@@ -1,7 +1,10 @@
 name: CI
 
 on:
+ HEAD
   workflow_dispatch:        # permet de lancer manuellement depuis l’UI
+
+ f6fc052 (Ajout du workflow CI pour tests unitaires et health-check)
   push:
     branches:
       - main
