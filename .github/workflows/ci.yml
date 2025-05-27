@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  workflow_dispatch:        # permet de lancer manuellement depuis l’UI
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies (API)
+        run: |
+          cd Rcvo-API
+          npm ci
+
+      - name: Run unit tests (API)
+        run: |
+          cd Rcvo-API
+          npm test
+
+      - name: Start API server
+        run: |
+          cd Rcvo-API
+          npm start &
+          sleep 10
+
+      - name: Test health endpoint
+        run: |
+          curl -fSL http://localhost:3000/api/health
+
+      - name: Install dependencies (UI)
+        run: |
+          cd Rcvo-UI
+          npm ci
+
+      - name: Build UI
+        run: |
+          cd Rcvo-UI
+          npm run build
