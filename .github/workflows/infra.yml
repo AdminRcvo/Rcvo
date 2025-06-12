@@ -1,0 +1,32 @@
+name: Deploy Infrastructure
+on:
+  push:
+    paths:
+      - 'infrastructure/**'
+      - '.github/workflows/infra.yml'
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.ASSISTANT_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: infrastructure/instances
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: infrastructure/instances
+        run: terraform plan -out=plan.tf
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        working-directory: infrastructure/instances
+        run: terraform apply -auto-approve plan.tf
