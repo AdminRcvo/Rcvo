@@ -1,0 +1,41 @@
+name: Deploy Terraform Infra
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1) Récupérer le code
+      - uses: actions/checkout@v4
+
+      # 2) Installer Terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0  # ou votre version préférée
+
+      # 3) Configurer AWS
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # 4) Terraform Init
+      - name: Terraform Init
+        working-directory: infrastructure/instances
+        run: terraform init
+
+      # 5) Terraform Plan
+      - name: Terraform Plan
+        working-directory: infrastructure/instances
+        run: terraform plan -out=tfplan
+
+      # 6) Terraform Apply
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        working-directory: infrastructure/instances
+        run: terraform apply -auto-approve tfplan
