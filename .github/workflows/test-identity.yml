@@ -1,0 +1,23 @@
+name: Test AWS Identity
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write      # autorise l’émission du jeton OIDC
+  contents: read       # pour checkout du repo
+
+jobs:
+  whoami:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.ASSISTANT_ROLE_ARN }}
+          aws-region:    ${{ secrets.AWS_REGION }}
+
+      - name: Verify identity
+        run: aws sts get-caller-identity
