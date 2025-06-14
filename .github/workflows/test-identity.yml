@@ -1,0 +1,16 @@
+ - name: Configure AWS credentials (OIDC)
+    uses: aws-actions/configure-aws-credentials@v2
+    with:
+      role-to-assume: ${{ secrets.ASSISTANT_ROLE_ARN }}
+      aws-region:    ${{ secrets.AWS_REGION }}
+
+  # En cas de problème OIDC, décommentez la section ci-dessous pour utiliser les clés statiques :
+  # - name: Configure AWS credentials (static keys)
+  #   uses: aws-actions/configure-aws-credentials@v2
+  #   with:
+  #     aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #     aws-region:            ${{ secrets.AWS_REGION }}
+
+  - name: Verify identity
+    run: aws sts get-caller-identity
