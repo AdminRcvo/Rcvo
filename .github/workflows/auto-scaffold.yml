@@ -1,0 +1,45 @@
+name: Auto-échafaudage RCVo
+
+# Déclenchement sur push vers main et manuel
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    name: Déployer le site statique
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v3
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Configurer les informations d'identification AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.DEPLOY_ROLE_ARN }}
+          aws-region:      ${{ secrets.AWS_REGION }}
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Builder le site
+        run: npm run build
+
+      - name: Synchroniser vers S3
+        run: |
+          aws s3 sync ./public s3://${{ secrets.S3_BUCKET_NAME }} --delete
+
+      - name: Invalidation CloudFront (si configuré)
+        if: ${{ secrets.CLOUDFRONT_ID != '' }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_ID }} \
+            --paths "/*"
