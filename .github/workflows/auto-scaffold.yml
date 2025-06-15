@@ -1,0 +1,84 @@
+name: Auto-Scaffold RCVo
+
+# lancement manuel depuis l’onglet Actions
+on:
+  workflow_dispatch:
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du repo
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.ASSISTANT_ROLE_ARN }}
+          aws-region:      ${{ secrets.AWS_REGION }}
+
+      - name: Génération du scaffold
+        run: |
+          # création des dossiers
+          mkdir -p backend frontend infrastructure
+
+          # fichiers d’exemple
+          cat > backend/main.go << 'EOF'
+          package main
+
+          import "fmt"
+
+          func main() {
+            fmt.Println("Hello RCVo backend!")
+          }
+          EOF
+
+          cat > frontend/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8"><title>RCVo</title></head>
+          <body><h1>Bienvenue sur RCVo</h1></body>
+          </html>
+          EOF
+
+          cat > infrastructure/main.tf << 'EOF'
+          terraform {
+            required_providers {
+              aws = {
+                source  = "hashicorp/aws"
+                version = "~> 4.0"
+              }
+            }
+          }
+
+          provider "aws" {
+            region = var.aws_region
+          }
+
+          resource "aws_s3_bucket" "rcvo_static" {
+            bucket = "rcvo-static-site-${random_id.id.hex}"
+            acl    = "public-read"
+          }
+          EOF
+
+          # versioning Terraform
+          cat > infrastructure/versions.tf << 'EOF'
+          terraform {
+            required_version = ">= 1.5.0"
+          }
+          EOF
+
+      - name: Commit des fichiers de scaffold
+        run: |
+          git config user.name  "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git add backend frontend infrastructure
+          git commit -m "chore: auto-scaffold du projet RCVo"
+        # ne plante pas si pas de nouveau contenu
+        continue-on-error: true
+
+      - name: Push sur main
+        run: |
+          git push origin HEAD:main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
