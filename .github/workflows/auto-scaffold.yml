@@ -1,0 +1,35 @@
+name: Auto-Scaffold RCVo
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v3
+
+      - name: Configurer les identifiants AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.ASSISTANT_ROLE_ARN }}
+          aws-region:     ${{ secrets.AWS_REGION }}
+
+      - name: Construire le scaffold
+        run: |
+          npm ci
+          npm run build
+
+      - name: Synchroniser vers S3
+        run: |
+          aws s3 sync ./dist s3://rcvo-officiel --delete
+
+      - name: Invalidation CloudFront (optionnel)
+        if: ${{ secrets.CLOUDFRONT_ID != '' }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_ID }} \
+            --paths "/*"
