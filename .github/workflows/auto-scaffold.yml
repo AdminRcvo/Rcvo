@@ -1,0 +1,58 @@
+name: Auto-échafaudage RCVo
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-west-3
+  S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}
+  CF_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_ID }}
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v3
+        with:
+          persist-credentials: true
+
+      - name: Configurer AWS (clés statiques)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Générer le scaffold
+        run: |
+          # … votre script …
+
+      - name: Commit des fichiers de scaffold
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "chore: add initial scaffold RCVo" || echo "Rien à committer"
+
+      - name: Push sur main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: git push origin HEAD:main
+
+      - name: Synchronisation vers S3
+        run: |
+          aws s3 sync frontend s3://${{ env.S3_BUCKET }} --delete
+
+      - name: Invalidation CloudFront (optionnelle)
+        if: env.CF_DISTRIBUTION_ID != ''
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ env.CF_DISTRIBUTION_ID }} \
+            --paths "/*"
