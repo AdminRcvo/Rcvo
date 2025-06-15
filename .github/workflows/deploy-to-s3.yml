@@ -1,0 +1,56 @@
+name: Deploy to S3
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.ASSISTANT_ROLE_ARN }}
+          aws-region:    ${{ secrets.AWS_REGION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: npm run build
+
+      - name: Sync build to S3
+        run: aws s3 sync ./frontend/build s3://${{ secrets.S3_BUCKET }} --delete
+
+      - name: Invalidate CloudFront (optional)
+        run: |
+          if [ -n "${{ secrets.CLOUDFRONT_ID }}" ]; then
+            echo "Invalidating CloudFront distribution ${{ secrets.CLOUDFRONT_ID }}…"
+            aws cloudfront create-invalidation \
+              --distribution-id ${{ secrets.CLOUDFRONT_ID }} \
+              --paths '/*'
+          else
+            echo "→ No CLOUDFRONT_ID secret set, skipping invalidation."
+          fi
