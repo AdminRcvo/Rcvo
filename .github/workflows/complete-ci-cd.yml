@@ -94,7 +94,6 @@ jobs:
   cost-optimize:
     name: AWS Cost Optimization
     if: ${{ always() }}
-    name: AWS Cost Optimization
     runs-on: ubuntu-latest
     needs: deploy-infra
     steps:
