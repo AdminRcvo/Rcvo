@@ -75,6 +75,33 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Configure AWS credentials for Infra
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Prepare infra code
+        run: |
+          ls
+          mv infrastructure infra
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.4.0
+
+      - name: Terraform Init & Apply
+        working-directory: infra
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          terraform init
+          terraform apply -auto-approve
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
       - name: Prepare infra code
         run: |
           # Accéder au dossier d'infrastructure (mono-repo)
