@@ -1,3 +1,4 @@
+```yaml
 name: Complete CI/CD
 
 # Déclenchement: push sur main, manuel et planifié quotidien à minuit UTC
@@ -112,16 +113,19 @@ jobs:
 
       - name: List running instances
         run: |
-          aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running \
+          aws ec2 describe-instances --region $AWS_REGION \
+            --filters Name=instance-state-name,Values=running \
             --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
 
       - name: Cleanup and downsize non-essential instances
         run: |
           set -eux
-          INSTANCES=$(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running \
+          INSTANCES=$(aws ec2 describe-instances --region $AWS_REGION \
+            --filters Name=instance-state-name,Values=running \
             --query 'Reservations[].Instances[].InstanceId' --output text)
           for id in $INSTANCES; do
-            TAG_KEYS=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id \
+            TAG_KEYS=$(aws ec2 describe-tags --region $AWS_REGION \
+              --filters Name=resource-id,Values=$id \
               --query 'Tags[].Key' --output text)
             if echo "$TAG_KEYS" | grep -E "Essential|Parametrage"; then
               echo "🌟 Instance $id tagged Essential/Parametrage, kept"
@@ -161,3 +165,5 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement complet terminé"
+```
+
