@@ -1,0 +1,36 @@
+name: Auto-échafaudage RCVo
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install & Build scaffold
+        run: |
+          if [ -d "scaffold" ]; then
+            cd scaffold
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+            npm run build || echo "⚠️ Pas de script build, skip"
+          else
+            echo "ℹ️ Pas de dossier scaffold, skip"
+          fi
+
+      - name: Commit & push
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "🚀 Auto-build scaffold [ci skip]"
+          file_pattern: "scaffold/dist/**"
+          branch: main
