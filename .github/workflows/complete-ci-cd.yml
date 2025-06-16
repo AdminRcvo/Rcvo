@@ -28,8 +28,7 @@ jobs:
           python-version: '3.x'
 
       - name: Install dependencies
-        run: |
-          pip install click requests pytest black isort
+        run: pip install click requests pytest black isort
 
       - name: Lint and format
         run: |
@@ -72,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Configure AWS credentials for Infra
@@ -82,40 +81,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Prepare infra code
-        run: |
-          ls
-          mv infrastructure infra
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.4.0
 
-      - name: Terraform Init & Apply
-        working-directory: infra
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          terraform init
-          terraform apply -auto-approve
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Prepare infra code
-        run: |
-          # Accéder au dossier d'infrastructure (mono-repo)
-          ls
-          mv infrastructure infra
-
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.4.0
-
-      - name: Terraform Init & Apply
-        working-directory: infra
+      - name: Run Terraform
+        working-directory: infrastructure
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
@@ -124,66 +96,43 @@ jobs:
 
   cost-optimize:
     name: AWS Cost Optimization
-    if: ${{ always() }}
     runs-on: ubuntu-latest
     needs: deploy-infra
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: ${{ secrets.MAINTENANCE_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      - name: Check maintenance role secret
-        run: |
-          if [ -z "${{ secrets.MAINTENANCE_ROLE_ARN }}" ]; then
-            echo "⚠️ MAINTENANCE_ROLE_ARN not set - AWS operations may fail"
-          else
-            echo "✅ MAINTENANCE_ROLE_ARN present"
-          fi
 
       - name: Debug AWS Identity
         run: |
-          echo "Calling as:" && aws sts get-caller-identity
+          aws sts get-caller-identity
           echo "Region: $AWS_REGION"
 
       - name: List running instances
-        run: |
-          echo "🔍 Debug: Listing instances in $AWS_REGION"
-          aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running \
-            --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
-          echo "🔍 Debug: Finished listing instances"
+        run: aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running
 
-      - name: Cleanup and downsize non-essential instances
+      - name: Cleanup and downsize
         run: |
-          set -eux
-          INSTANCES=$(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running \
-            --query 'Reservations[].Instances[].InstanceId' --output text)
-          echo "Instances to examine: $INSTANCES"
+          INSTANCES=$(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text)
           for id in $INSTANCES; do
-            TAG_KEYS=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id \
-              --query 'Tags[].Key' --output text)
-            if echo "$TAG_KEYS" | grep -E "Essential|Parametrage"; then
-              echo "🌟 Instance $id tagged Essential/Parametrage, kept"
+            TAGS=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
+            if echo "$TAGS" | grep -E "Essential|Parametrage"; then
               continue
             fi
-            TYPE=$(aws ec2 describe-instances --region $AWS_REGION --instance-ids $id \
-              --query 'Reservations[0].Instances[0].InstanceType' --output text)
-            echo "Processing $id of type $TYPE"
+            TYPE=$(aws ec2 describe-instances --region $AWS_REGION --instance-ids $id --query 'Reservations[0].Instances[0].InstanceType' --output text)
             if [ "$TYPE" != "t2.micro" ]; then
-              echo "⏸️ Stopping $id"
               aws ec2 stop-instances --instance-ids $id --region $AWS_REGION
               aws ec2 wait instance-stopped --instance-ids $id --region $AWS_REGION
-              echo "🔄 Modifying $id to t2.micro"
               aws ec2 modify-instance-attribute --instance-id $id --instance-type '{"Value":"t2.micro"}' --region $AWS_REGION
               aws ec2 start-instances --instance-ids $id --region $AWS_REGION
-            else
-              echo "$id already t2.micro"
             fi
-            echo "🗑️ Terminating unused instance $id"
             aws ec2 terminate-instances --instance-ids $id --region $AWS_REGION
           done
 
-  invalidate-cdn:
+invalidate-cdn:
     name: Invalidate CloudFront Cache
     runs-on: ubuntu-latest
     needs: cost-optimize
@@ -195,8 +144,6 @@ jobs:
         run: |
           if [ -n "$DIST" ]; then
             aws cloudfront create-invalidation --distribution-id $DIST --paths '/*' --region $AWS_REGION
-          else
-            echo "ℹ️ No CloudFront dist, skip"
           fi
 
   notify:
@@ -204,7 +151,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: invalidate-cdn
     steps:
-      - name: Send Slack msg
+      - name: Send Slack message
         uses: slackapi/slack-github-action@v1.23.0
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
