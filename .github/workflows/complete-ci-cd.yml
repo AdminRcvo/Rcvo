@@ -109,8 +109,10 @@ jobs:
 
       - name: List running instances
         run: |
+          echo "🔍 Debug: Listing instances in $AWS_REGION"
           aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running \
             --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
+          echo "🔍 Debug: Finished listing instances"
 
       - name: Cleanup and downsize non-essential instances
         run: |
@@ -138,6 +140,8 @@ jobs:
             else
               echo "$id already t2.micro"
             fi
+            echo "🗑️ Terminating unused instance $id"
+            aws ec2 terminate-instances --instance-ids $id --region $AWS_REGION
           done
 
   invalidate-cdn:
