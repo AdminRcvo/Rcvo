@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: deploy-infra
     steps:
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials for maintenance
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -112,27 +112,42 @@ jobs:
           echo "Region: $AWS_REGION"
 
       - name: List running instances
-        run: aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running
-
-      - name: Cleanup and downsize
         run: |
-          INSTANCES=$(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text)
+          echo "🔍 Listing running instances in $AWS_REGION"
+          aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running \
+            --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
+
+      - name: Cleanup and downsize non-essential instances
+        run: |
+          set -eux
+          INSTANCES=$(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          echo "Instances to examine: $INSTANCES"
           for id in $INSTANCES; do
-            TAGS=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
-            if echo "$TAGS" | grep -E "Essential|Parametrage"; then
+            TAG_KEYS=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id \
+              --query 'Tags[].Key' --output text)
+            if echo "$TAG_KEYS" | grep -E "Essential|Parametrage"; then
+              echo "🌟 Instance $id tagged Essential/Parametrage, kept"
               continue
             fi
-            TYPE=$(aws ec2 describe-instances --region $AWS_REGION --instance-ids $id --query 'Reservations[0].Instances[0].InstanceType' --output text)
+            TYPE=$(aws ec2 describe-instances --region $AWS_REGION --instance-ids $id \
+              --query 'Reservations[0].Instances[0].InstanceType' --output text)
+            echo "Processing $id of type $TYPE"
             if [ "$TYPE" != "t2.micro" ]; then
+              echo "⏸️ Stopping $id"
               aws ec2 stop-instances --instance-ids $id --region $AWS_REGION
               aws ec2 wait instance-stopped --instance-ids $id --region $AWS_REGION
+              echo "🔄 Modifying $id to t2.micro"
               aws ec2 modify-instance-attribute --instance-id $id --instance-type '{"Value":"t2.micro"}' --region $AWS_REGION
               aws ec2 start-instances --instance-ids $id --region $AWS_REGION
+            else
+              echo "$id already t2.micro"
             fi
+            echo "🗑️ Terminating unused instance $id"
             aws ec2 terminate-instances --instance-ids $id --region $AWS_REGION
           done
 
-    invalidate-cdn:
+  invalidate-cdn:
     name: Invalidate CloudFront Cache
     runs-on: ubuntu-latest
     needs: cost-optimize
@@ -156,4 +171,5 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement complet terminé"
+
 
