@@ -98,14 +98,17 @@ jobs:
     needs: deploy-infra
     steps:
       - name: Configure AWS credentials
-        if: ${{ secrets.MAINTENANCE_ROLE_ARN != '' }}
         uses: aws-actions/configure-aws-credentials@v2
         with:
           role-to-assume: ${{ secrets.MAINTENANCE_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
-      - name: Warn if no AWS credentials
-        if: ${{ secrets.MAINTENANCE_ROLE_ARN == '' }}
-        run: echo "⚠️ No MAINTENANCE_ROLE_ARN secret defined, skipping AWS credential config"
+      - name: Check maintenance role secret
+        run: |
+          if [ -z "${{ secrets.MAINTENANCE_ROLE_ARN }}" ]; then
+            echo "⚠️ MAINTENANCE_ROLE_ARN not set - AWS operations may fail"
+          else
+            echo "✅ MAINTENANCE_ROLE_ARN present"
+          fi
 
       - name: Debug AWS Identity
         run: |
@@ -175,5 +178,4 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement complet terminé"
-
 
