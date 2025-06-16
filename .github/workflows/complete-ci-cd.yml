@@ -146,6 +146,20 @@ invalidate-cdn:
             aws cloudfront create-invalidation --distribution-id $DIST --paths '/*' --region $AWS_REGION
           fi
 
+    invalidate-cdn:
+    name: Invalidate CloudFront Cache
+    runs-on: ubuntu-latest
+    needs: cost-optimize
+    steps:
+      - name: Invalidate if configured
+        env:
+          DIST: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          if [ -n "$DIST" ]; then
+            aws cloudfront create-invalidation --distribution-id $DIST --paths '/*' --region $AWS_REGION
+          fi
+
   notify:
     name: Notify Slack
     runs-on: ubuntu-latest
@@ -156,5 +170,6 @@ invalidate-cdn:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement complet terminé"
+
 
 
