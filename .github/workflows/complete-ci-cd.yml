@@ -1,10 +1,9 @@
-```yaml
 name: Complete CI/CD
 
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
     - cron: '0 0 * * *'
 
@@ -65,7 +64,6 @@ jobs:
         with:
           repository: AdminRcvo/Rcvo-infra
           path: infrastructure
-          fetch-depth: 1
       - name: Configure AWS credentials for Infra
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -113,7 +111,7 @@ jobs:
             if [ "$type" != "t2.micro" ]; then
               aws ec2 stop-instances --instance-ids "$id" --region "$AWS_REGION"
               aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION"
-              aws ec2 modify-instance-attribute --instance-id "$id" --instance-type "{\"Value\":\"t2.micro\"}" --region "$AWS_REGION"
+              aws ec2 modify-instance-attribute --instance-id "$id" --instance-type '{"Value":"t2.micro"}' --region "$AWS_REGION"
               aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
             fi
           done
@@ -123,14 +121,14 @@ jobs:
     needs: cost-optimize
     runs-on: ubuntu-latest
     env:
-      DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
     steps:
-      - name: Invalidate distribution (if set)
+      - name: Invalidate distribution (if configured)
         run: |
-          if [ -z "$DISTRIBUTION_ID" ]; then
+          if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
             echo "ℹ️ No distribution ID, skipping"
           else
-            aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*'
+            aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths '/*'
           fi
 
   notify:
@@ -143,4 +141,4 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
-```
+
