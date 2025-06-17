@@ -119,7 +119,7 @@ jobs:
             fi
           done
 
-  invalidate-cdn:e-cdn:
+  invalidate-cdn:
     name: Invalidate CloudFront Cache
     needs: cost-optimize
     runs-on: ubuntu-latest
