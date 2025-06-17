@@ -131,12 +131,14 @@ jobs:
                 aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION"
                 aws ec2 modify-instance-attribute --instance-id "$id" --instance-type "{\"Value\":\"t2.micro\"}" --region "$AWS_REGION"
                 aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
+                aws ec2 wait instance-running --instance-ids "$id" --region "$AWS_REGION"
               else
                 echo "✅ $id est déjà en t2.micro"
               fi
             else
               echo "🗑️  Terminate $id"
               aws ec2 terminate-instances --instance-ids "$id" --region "$AWS_REGION"
+              aws ec2 wait instance-terminated --instance-ids "$id" --region "$AWS_REGION"
             fi
           done
 
@@ -167,4 +169,3 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
-
