@@ -1,4 +1,3 @@
-```yaml
 name: Complete CI/CD
 
 on:
@@ -9,9 +8,9 @@ on:
     - cron: '0 0 * * *'
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: write   # allow push of build artifacts
+  packages: write   # allow publish to GitHub packages/PyPI
+  id-token: write   # allow OIDC AWS auth
 
 jobs:
   build:
@@ -132,5 +131,4 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
-```
 
