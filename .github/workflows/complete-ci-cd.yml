@@ -1,4 +1,3 @@
-```yaml
 name: Complete CI/CD
 
 on:
@@ -60,7 +59,7 @@ jobs:
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
-      - name: Checkout code
+      - name: Checkout infra code
         uses: actions/checkout@v3
         with:
           path: infrastructure
@@ -136,5 +135,4 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
-```
 
