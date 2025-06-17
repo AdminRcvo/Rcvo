@@ -9,9 +9,9 @@ on:
     - cron: '0 0 * * *'
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: write         # Publier le code
+  packages: write         # Publier sur GitHub Packages
+  id-token: write         # OIDC pour AWS
 
 jobs:
   build:
@@ -118,7 +118,7 @@ jobs:
     steps:
       - name: Skip if no distribution ID
         if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID == '' }}
-        run: echo "No distribution ID, skipping"
+        run: echo "ℹ️ No distribution ID, skipping"
       - name: Create invalidation
         if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID != '' }}
         run: |
