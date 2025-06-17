@@ -1,9 +1,9 @@
-name: Complete CI/CD
+name: "Complete CI/CD"
 
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
     - cron: '0 0 * * *'
 
@@ -77,7 +77,7 @@ jobs:
           terraform_version: '1.4.0'
 
       - name: Terraform Init & Apply
-        working-directory: "Rcvo/infrastructure/instances"
+        working-directory: Rcvo/infrastructure/instances
         run: |
           terraform init
           terraform apply -auto-approve
@@ -95,20 +95,27 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Cleanup & Downsize Instances
         run: |
-          for id in $(aws ec2 describe-instances --region "$AWS_REGION" --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text); do
-            tags=$(aws ec2 describe-tags --region "$AWS_REGION" --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
+          instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
+            --filters Name=instance-state-name,Values=running \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          for id in $instances; do
+            tags=$(aws ec2 describe-tags --region "$AWS_REGION" \
+              --filters Name=resource-id,Values="$id" \
+              --query 'Tags[].Key' --output text)
             if echo "$tags" | grep -Eq 'Essential|Parametrage'; then
               echo "🌟 Keep $id"
               continue
             fi
-            type=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids $id --query 'Reservations[0].Instances[0].InstanceType' --output text)
+            type=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$id" \
+              --query 'Reservations[0].Instances[0].InstanceType' --output text)
             if [ "$type" != "t2.micro" ]; then
-              aws ec2 stop-instances --instance-ids $id --region "$AWS_REGION"
-              aws ec2 wait instance-stopped --instance-ids $id --region "$AWS_REGION"
-              aws ec2 modify-instance-attribute --instance-id $id --instance-type '{"Value":"t2.micro"}' --region "$AWS_REGION"
-              aws ec2 start-instances --instance-ids $id --region "$AWS_REGION"
+              aws ec2 stop-instances --instance-ids "$id" --region "$AWS_REGION"
+              aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION"
+              aws ec2 modify-instance-attribute --instance-id "$id" --instance-type '{"Value":"t2.micro"}' --region "$AWS_REGION"
+              aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
             fi
           done
 
@@ -119,7 +126,7 @@ jobs:
     env:
       CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
     steps:
-      - name: Invalidate distribution
+      - name: Invalidate distribution (if configured)
         run: |
           if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
             echo "ℹ️ No distribution ID, skipping"
