@@ -117,8 +117,7 @@ jobs:
     steps:
       - name: Skip if no distribution ID
         if: env.CLOUDFRONT_ID == ''
-        run: |
-          echo "No distribution ID, skipping"
+        run: echo "No distribution ID, skipping"
       - name: Create invalidation
         if: env.CLOUDFRONT_ID != ''
         run: |
