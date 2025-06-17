@@ -1,4 +1,3 @@
-
 name: Complete CI/CD
 
 on:
@@ -89,7 +88,7 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-cost-optimize:
+  cost-optimize:
     name: AWS Cost Optimization
     needs: deploy-infra
     runs-on: ubuntu-latest
@@ -102,6 +101,7 @@ cost-optimize:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Cleanup & Downsize Instances
         run: |
           instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
@@ -134,10 +134,10 @@ cost-optimize:
     steps:
       - name: Invalidate distribution (if configured)
         run: |
-          if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
+          if [ -z "${CLOUDFRONT_DISTRIBUTION_ID}" ]; then
             echo "ℹ️ No distribution ID, skipping"
           else
-            aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths '/*'
+            aws cloudfront create-invalidation --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" --paths '/*'
           fi
 
   notify:
@@ -150,4 +150,3 @@ cost-optimize:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
-
