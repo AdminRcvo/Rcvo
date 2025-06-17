@@ -113,9 +113,12 @@ jobs:
               --query 'Reservations[0].Instances[0].InstanceType' --output text)
             if [ "$type" != "t2.micro" ]; then
               aws ec2 stop-instances --instance-ids "$id" --region "$AWS_REGION"
-              aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION" || true
-              aws ec2 modify-instance-attribute --instance-id "$id" --instance-type '{"Value":"t2.micro"}' --region "$AWS_REGION"
-              aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
+              if aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION"; then
+                aws ec2 modify-instance-attribute --instance-id "$id" --instance-type '{"Value":"t2.micro"}' --region "$AWS_REGION"
+                aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
+              else
+                echo "⚠️ Instance $id failed to stop, skipping resize."
+              fi
             fi
           done
 
