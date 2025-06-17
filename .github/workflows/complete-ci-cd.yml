@@ -64,11 +64,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Checkout Infra repository
+            - name: Checkout code
         uses: actions/checkout@v3
         with:
-          repository: AdminRcvo/Rcvo-infra
-          path: infrastructure
+          fetch-depth: 0
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
