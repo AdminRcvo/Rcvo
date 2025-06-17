@@ -1,3 +1,4 @@
+```yaml
 name: Complete CI/CD
 
 on:
@@ -8,9 +9,9 @@ on:
     - cron: '0 0 * * *'
 
 permissions:
-  contents: write   # allow push of build artifacts
-  packages: write   # allow publish to GitHub packages/PyPI
-  id-token: write   # allow OIDC AWS auth
+  contents: write
+  packages: write
+  id-token: write
 
 jobs:
   build:
@@ -29,7 +30,7 @@ jobs:
           if ls *test*.py tests >/dev/null 2>&1; then
             pytest --maxfail=1 --disable-warnings -q
           else
-            echo "ℹ️ Aucun test détecté, skip"
+            echo "ℹ️ No tests found, skipping"
           fi
 
   publish-pypi:
@@ -53,9 +54,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Checkout infra
+      - name: Checkout infra repository
         uses: actions/checkout@v3
         with:
+          repository: AdminRcvo/Rcvo-infra
           path: infrastructure
       - name: Configure AWS credentials for Infra
         uses: aws-actions/configure-aws-credentials@v2
@@ -88,13 +90,15 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       - name: List running instances
         run: |
-          aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running \
+          aws ec2 describe-instances \
+            --region $AWS_REGION \
+            --filters Name=instance-state-name,Values=running \
             --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
       - name: Cleanup & Downsize
         run: |
           for id in $(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text); do
-            keys=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
-            if echo "$keys" | grep -Eq 'Essential|Parametrage'; then
+            tags=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
+            if echo "$tags" | grep -Eq 'Essential|Parametrage'; then
               echo "🌟 Keep $id"
               continue
             fi
@@ -111,16 +115,16 @@ jobs:
     name: Invalidate CloudFront Cache
     runs-on: ubuntu-latest
     needs: cost-optimize
-    env:
-      CLOUDFRONT_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
     steps:
       - name: Skip if no distribution ID
-        if: env.CLOUDFRONT_ID == ''
+        if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID == '' }}
         run: echo "No distribution ID, skipping"
       - name: Create invalidation
-        if: env.CLOUDFRONT_ID != ''
+        if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID != '' }}
         run: |
-          aws cloudfront create-invalidation --distribution-id $CLOUDFRONT_ID --paths '/*'
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths '/*'
 
   notify:
     name: Notify Slack
@@ -131,4 +135,5 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
+```
 
