@@ -55,8 +55,6 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v3
-        with:
-          path: infrastructure
       - uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -81,9 +79,6 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      - name: Debug AWS Identity
-        run: |
-          aws sts get-caller-identity
       - name: List running instances
         run: |
           aws ec2 describe-instances --region ${{ secrets.AWS_REGION }} \
@@ -91,7 +86,6 @@ jobs:
             --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
       - name: Cleanup & Downsize
         run: |
-          set -eux
           for id in $(aws ec2 describe-instances --region ${{ secrets.AWS_REGION }} --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text); do
             keys=$(aws ec2 describe-tags --region ${{ secrets.AWS_REGION }} --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
             if echo "$keys" | grep -Eq 'Essential|Parametrage'; then
@@ -105,7 +99,6 @@ jobs:
               aws ec2 modify-instance-attribute --instance-id $id --instance-type '{"Value":"t2.micro"}' --region ${{ secrets.AWS_REGION }}
               aws ec2 start-instances --instance-ids $id --region ${{ secrets.AWS_REGION }}
             fi
-            aws ec2 terminate-instances --instance-ids $id --region ${{ secrets.AWS_REGION }}
           done
 
   invalidate-cdn:
