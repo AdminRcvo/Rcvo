@@ -73,11 +73,12 @@ jobs:
         with:
           terraform_version: '1.4.0'
 
-      # Checkout Terraform infrastructure repository
+            # Checkout Terraform infrastructure repository
       - name: Checkout Infra Repo
         uses: actions/checkout@v3
         with:
           repository: AdminRcvo/Rcvo-infra
+          ref: main
           path: infrastructure
 
       - name: Terraform Init & Apply
