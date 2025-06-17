@@ -76,16 +76,71 @@ jobs:
         with:
           terraform_version: '1.4.0'
 
-      - name: Checkout Infra Repository
-        uses: actions/checkout@v3
-        with:
-          repository: AdminRcvo/Rcvo-infra
-          ref: main
-          path: infrastructure
-          fetch-depth: 0
-
       - name: Terraform Init & Apply
         working-directory: infrastructure
         run: |
           terraform init
           terraform apply -auto-approve
+
+  cost-optimize:
+    name: AWS Cost Optimization
+    needs: deploy-infra
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Cleanup & Downsize Instances
+        run: |
+          instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
+            --filters Name=instance-state-name,Values=running \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          for id in $instances; do
+            tags=$(aws ec2 describe-tags --region "$AWS_REGION" \
+              --filters Name=resource-id,Values="$id" \
+              --query 'Tags[].Key' --output text)
+            if echo "$tags" | grep -Eq 'Essential|Parametrage'; then
+              echo "🌟 Keep $id"
+              continue
+            fi
+            type=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$id" \
+              --query 'Reservations[0].Instances[0].InstanceType' --output text)
+            if [ "$type" != "t2.micro" ]; then
+              aws ec2 stop-instances --instance-ids "$id" --region "$AWS_REGION"
+              aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION"
+              aws ec2 modify-instance-attribute --instance-id "$id" --instance-type '{"Value":"t2.micro"}' --region "$AWS_REGION"
+              aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
+            fi
+          done
+
+  invalidate-cdn:
+    name: Invalidate CloudFront Cache
+    needs: cost-optimize
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+    steps:
+      - name: Invalidate distribution (if configured)
+        run: |
+          if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
+            echo "ℹ️ No distribution ID, skipping"
+          else
+            aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths '/*'
+          fi
+
+  notify:
+    name: Notify Slack
+    needs: invalidate-cdn
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack message
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: "✅ Déploiement CI/CD complet !"
