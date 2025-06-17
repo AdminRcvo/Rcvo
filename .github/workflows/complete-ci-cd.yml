@@ -1,9 +1,10 @@
+```yaml
 name: Complete CI/CD
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch: {}
+    branches: [main]
+  workflow_dispatch:
   schedule:
     - cron: '0 0 * * *'
 
@@ -56,8 +57,10 @@ jobs:
     name: Deploy Infrastructure
     needs: build
     runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
-      - name: Checkout code into infrastructure/
+      - name: Checkout code
         uses: actions/checkout@v3
         with:
           path: infrastructure
@@ -74,8 +77,6 @@ jobs:
           terraform_version: 1.4.0
       - name: Terraform Init & Apply
         working-directory: infrastructure
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           terraform init
           terraform apply -auto-approve
@@ -93,13 +94,7 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      - name: List running instances
-        run: |
-          aws ec2 describe-instances \
-            --region $AWS_REGION \
-            --filters Name=instance-state-name,Values=running \
-            --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
-      - name: Cleanup & Downsize
+      - name: Cleanup & Downsize instances
         run: |
           for id in $(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text); do
             tags=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
@@ -120,17 +115,16 @@ jobs:
     name: Invalidate CloudFront Cache
     needs: cost-optimize
     runs-on: ubuntu-latest
+    env:
+      DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
     steps:
-      - name: Invalidate CloudFront (if configured)
+      - name: Invalidate distribution (if set)
         run: |
-          if [ -z "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" ]; then
+          if [ -z "$DISTRIBUTION_ID" ]; then
             echo "ℹ️ No distribution ID, skipping"
           else
-            aws cloudfront create-invalidation \
-              --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
-              --paths '/*'
+            aws cloudfront create-invalidation --distribution-id $DISTRIBUTION_ID --paths '/*'
           fi
-        shell: bash
 
   notify:
     name: Notify Slack
