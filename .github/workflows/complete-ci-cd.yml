@@ -64,6 +64,7 @@ jobs:
         with:
           repository: AdminRcvo/Rcvo-infra
           path: infrastructure
+          ref: main
       - name: Configure AWS credentials for Infra
         uses: aws-actions/configure-aws-credentials@v2
         with:
