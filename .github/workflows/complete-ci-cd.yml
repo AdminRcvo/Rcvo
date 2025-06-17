@@ -1,10 +1,9 @@
-```yaml
 name: Complete CI/CD
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch: {}
   schedule:
     - cron: '0 0 * * *'
 
@@ -35,9 +34,9 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    runs-on: ubuntu-latest
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
@@ -51,8 +50,8 @@ jobs:
 
   deploy-infra:
     name: Deploy Infrastructure
-    runs-on: ubuntu-latest
     needs: build
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout infra repository
         uses: actions/checkout@v3
@@ -77,8 +76,8 @@ jobs:
 
   cost-optimize:
     name: AWS Cost Optimization
-    runs-on: ubuntu-latest
     needs: deploy-infra
+    runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
@@ -113,8 +112,8 @@ jobs:
 
   invalidate-cdn:
     name: Invalidate CloudFront Cache
-    runs-on: ubuntu-latest
     needs: cost-optimize
+    runs-on: ubuntu-latest
     steps:
       - name: Skip if no distribution ID
         if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID == '' }}
@@ -128,12 +127,11 @@ jobs:
 
   notify:
     name: Notify Slack
-    runs-on: ubuntu-latest
     needs: invalidate-cdn
+    runs-on: ubuntu-latest
     steps:
       - uses: slackapi/slack-github-action@v1.23.0
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
-```
 
