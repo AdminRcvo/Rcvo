@@ -95,41 +95,52 @@ jobs:
             --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
       - name: Cleanup & Downsize
         run: |
-          for id in $(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text); do
-            tags=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
+          for id in $(aws ec2 describe-instances \
+              --region $AWS_REGION \
+              --filters Name=instance-state-name,Values=running \
+              --query 'Reservations[].Instances[].InstanceId' --output text); do
+            tags=$(aws ec2 describe-tags \
+              --region $AWS_REGION \
+              --filters Name=resource-id,Values=$id \
+              --query 'Tags[].Key' --output text)
             if echo "$tags" | grep -Eq 'Essential|Parametrage'; then
               echo "🌟 Keep $id"
               continue
             fi
-            type=$(aws ec2 describe-instances --region $AWS_REGION --instance-ids $id --query 'Reservations[0].Instances[0].InstanceType' --output text)
+            type=$(aws ec2 describe-instances \
+              --region $AWS_REGION \
+              --instance-ids $id \
+              --query 'Reservations[0].Instances[0].InstanceType' --output text)
             if [ "$type" != "t2.micro" ]; then
               aws ec2 stop-instances --instance-ids $id --region $AWS_REGION
               aws ec2 wait instance-stopped --instance-ids $id --region $AWS_REGION
-              aws ec2 modify-instance-attribute --instance-id $id --instance-type '{"Value":"t2.micro"}' --region $AWS_REGION
+              aws ec2 modify-instance-attribute \
+                --instance-id $id \
+                --instance-type '{"Value":"t2.micro"}' \
+                --region $AWS_REGION
               aws ec2 start-instances --instance-ids $id --region $AWS_REGION
             fi
           done
 
   invalidate-cdn:
-  name: Invalidate CloudFront Cache
-  needs: cost-optimize
-  runs-on: ubuntu-latest
-  env:
-    CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
-  steps:
-    - name: Invalidate CloudFront Cache
-      run: |
-        if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
-          echo "ℹ️ No distribution ID, skipping"
-        else
-          aws cloudfront create-invalidation \
-            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-            --paths '/*'
-        fi
-      shell: bash
+    name: Invalidate CloudFront Cache
+    needs: cost-optimize
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+    steps:
+      - name: Create invalidation (if set)
+        run: |
+          if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
+            echo "ℹ️ No distribution ID, skipping"
+          else
+            aws cloudfront create-invalidation \
+              --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+              --paths '/*'
+          fi
+        shell: bash
 
-notify:
-
+  notify:
     name: Notify Slack
     needs: invalidate-cdn
     runs-on: ubuntu-latest
