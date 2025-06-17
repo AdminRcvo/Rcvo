@@ -138,12 +138,13 @@ jobs:
           fi
 
   notify:
-    name: Notify Slack
-    needs: invalidate-cdn
-    runs-on: ubuntu-latest
-    steps:
-      - name: Send Slack message
-        uses: slackapi/slack-github-action@v1.23.0
-        with:
-          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
-          slack-message: "✅ Déploiement CI/CD complet !"
+  name: Notify Slack
+  needs: invalidate-cdn
+  runs-on: ubuntu-latest
+  steps:
+    - name: Send Slack message
+      uses: slackapi/slack-github-action@v1.23.0
+      with:
+        bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
+        channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+        slack-message: "✅ Déploiement CI/CD complet !"
