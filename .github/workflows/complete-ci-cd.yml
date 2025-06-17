@@ -98,6 +98,7 @@ jobs:
 
       - name: Cleanup & Downsize Instances
         run: |
+          # 1) Déterminer les 4 instances essentielles (serveur, lb, env, prod)
           roles=(Rcvo-Serveur Rcvo-Backend-lb Rcvo-Backend-env rcvo-backend-prod)
           keep_ids=()
           for role in "${roles[@]}"; do
@@ -110,15 +111,17 @@ jobs:
               echo "⭐️ Garder $role → $id"
               keep_ids+=("$id")
             else
-              echo "⚠️ Aucun running found pour $role"
+              echo "⚠️ Aucun running trouvé pour $role"
             fi
           done
 
+          # 2) Lister toutes les instances en running
           all_ids=($(aws ec2 describe-instances \
             --filters Name=instance-state-name,Values=running \
             --region "$AWS_REGION" \
             --query 'Reservations[].Instances[].InstanceId' --output text))
 
+          # 3) Processus : conserver ou downsize/terminate
           for id in "${all_ids[@]}"; do
             if [[ " ${keep_ids[*]} " =~ " ${id} " ]]; then
               type=$(aws ec2 describe-instances --instance-ids "$id" --region "$AWS_REGION" --query 'Reservations[0].Instances[0].InstanceType' --output text)
@@ -164,3 +167,4 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
+
