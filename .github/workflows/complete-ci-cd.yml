@@ -111,21 +111,25 @@ jobs:
           done
 
   invalidate-cdn:
-    name: Invalidate CloudFront Cache
-    needs: cost-optimize
-    runs-on: ubuntu-latest
-    steps:
-      - name: Skip if no distribution ID
-        if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID == '' }}
-        run: echo "ℹ️ No distribution ID, skipping"
-      - name: Create invalidation
-        if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID != '' }}
-        run: |
+  name: Invalidate CloudFront Cache
+  needs: cost-optimize
+  runs-on: ubuntu-latest
+  env:
+    CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+  steps:
+    - name: Invalidate CloudFront Cache
+      run: |
+        if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
+          echo "ℹ️ No distribution ID, skipping"
+        else
           aws cloudfront create-invalidation \
-            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
             --paths '/*'
+        fi
+      shell: bash
 
-  notify:
+notify:
+
     name: Notify Slack
     needs: invalidate-cdn
     runs-on: ubuntu-latest
