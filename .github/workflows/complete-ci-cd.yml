@@ -59,12 +59,10 @@ jobs:
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
-      - name: Checkout Infra Repository
+      - name: Checkout code
         uses: actions/checkout@v3
         with:
-          repository: AdminRcvo/rcvo-infra
-          path: infrastructure
-          ref: main
+          fetch-depth: 0
 
       - name: Configure AWS credentials for Infra
         uses: aws-actions/configure-aws-credentials@v2
@@ -84,7 +82,7 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-  cost-optimize:
+cost-optimize:
     name: AWS Cost Optimization
     needs: deploy-infra
     runs-on: ubuntu-latest
