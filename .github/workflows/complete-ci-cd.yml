@@ -98,31 +98,63 @@ jobs:
 
       - name: Cleanup & Downsize Instances
         run: |
-          instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
-            --filters Name=instance-state-name,Values=running \
-            --query 'Reservations[].Instances[].InstanceId' --output text)
-          for id in $instances; do
-            tags=$(aws ec2 describe-tags --region "$AWS_REGION" \
-              --filters Name=resource-id,Values="$id" \
-              --query 'Tags[].Key' --output text)
-            if echo "$tags" | grep -Eq 'Essential|Parametrage'; then
-              echo "🌟 Keep $id"
-              continue
-            fi
-            type=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$id" \
-              --query 'Reservations[0].Instances[0].InstanceType' --output text)
-            if [ "$type" != "t2.micro" ]; then
-              aws ec2 stop-instances --instance-ids "$id" --region "$AWS_REGION"
-              if aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION"; then
-                aws ec2 modify-instance-attribute --instance-id "$id" --instance-type '{"Value":"t2.micro"}' --region "$AWS_REGION"
-                aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
-              else
-                echo "⚠️ Instance $id failed to stop, skipping resize."
-              fi
+          # Roles à conserver
+          roles=(Rcvo-Serveur Rcvo-Backend-lb Rcvo-Backend-env rcvo-backend-prod)
+
+          # 1) Pour chaque rôle, on prend l'instance la plus ancienne
+          keep_ids=()
+          for role in "${roles[@]}"; do
+            id=$(aws ec2 describe-instances \
+              --filters \
+                Name=instance-state-name,Values=running \
+                Name=tag:Name,Values="$role" \
+              --region "$AWS_REGION" \
+              --query 'sort_by(Reservations[].Instances[], &LaunchTime)[0].InstanceId' \
+              --output text)
+            if [ "$id" != "None" ]; then
+              echo "⭐️ Garder $role → $id"
+              keep_ids+=("$id")
+            else
+              echo "⚠️ Aucun running found pour $role"
             fi
           done
 
-  invalidate-cdn:
+          # 2) Lister toutes les running
+          all_ids=($(aws ec2 describe-instances \
+            --filters Name=instance-state-name,Values=running \
+            --region "$AWS_REGION" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text))
+
+          # 3) Terminate ou downsize
+          for id in "${all_ids[@]}"; do
+            if [[ " ${keep_ids[*]} " =~ " ${id} " ]]; then
+              # C’est une instance à conserver → on s’assure qu’elle est en t2.micro
+              type=$(aws ec2 describe-instances \
+                --instance-ids "$id" \
+                --region "$AWS_REGION" \
+                --query 'Reservations[0].Instances[0].InstanceType' \
+                --output text)
+              if [ "$type" != "t2.micro" ]; then
+                echo "🔄 Downsize $id de $type → t2.micro"
+                aws ec2 stop-instances --instance-ids "$id" --region "$AWS_REGION"
+                aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION"
+                aws ec2 modify-instance-attribute \
+                  --instance-id "$id" \
+                  --instance-type "{\"Value\":\"t2.micro\"}" \
+                  --region "$AWS_REGION"
+                aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
+              else
+                echo "✅ $id est déjà en t2.micro"
+              fi
+            else
+              # Pas dans la liste des 4 → suppression
+              echo "🗑️  Terminate $id"
+              aws ec2 terminate-instances --instance-ids "$id" --region "$AWS_REGION"
+            fi
+          done
+
+      invalidate-cdn:
     name: Invalidate CloudFront Cache
     needs: cost-optimize
     runs-on: ubuntu-latest
