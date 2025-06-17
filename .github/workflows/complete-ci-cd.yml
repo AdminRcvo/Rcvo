@@ -56,16 +56,14 @@ jobs:
       - uses: actions/checkout@v3
       - uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ secrets.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
       - uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.4.0
       - name: Terraform Init & Apply
         working-directory: infrastructure
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           terraform init
           terraform apply -auto-approve
@@ -77,35 +75,35 @@ jobs:
     steps:
       - uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ secrets.AWS_REGION }}
-      - run: |
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Debug AWS Identity
+        run: |
           aws sts get-caller-identity
-          echo "Region: $AWS_REGION"
-      - run: |
+          echo "Region: ${{ secrets.AWS_REGION }}"
+      - name: List running instances
+        run: |
           aws ec2 describe-instances --region ${{ secrets.AWS_REGION }} \
             --filters Name=instance-state-name,Values=running \
             --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
       - name: Cleanup & Downsize
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -eux
-          IDS=$(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text)
-          for id in $IDS; do
-            KEYS=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
-            if echo "$KEYS" | grep -E "Essential|Parametrage"; then
-              echo "🌟 Keep $id"; continue
+          for id in $(aws ec2 describe-instances --region ${{ secrets.AWS_REGION }} --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text); do
+            keys=$(aws ec2 describe-tags --region ${{ secrets.AWS_REGION }} --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
+            if echo "$keys" | grep -Eq 'Essential|Parametrage'; then
+              echo "🌟 Keep $id"
+              continue
             fi
-            TYPE=$(aws ec2 describe-instances --region $AWS_REGION --instance-ids $id --query 'Reservations[0].Instances[0].InstanceType' --output text)
-            if [ "$TYPE" != "t2.micro" ]; then
-              aws ec2 stop-instances --instance-ids $id --region $AWS_REGION
-              aws ec2 wait instance-stopped --instance-ids $id --region $AWS_REGION
-              aws ec2 modify-instance-attribute --instance-id $id --instance-type '{"Value":"t2.micro"}' --region $AWS_REGION
-              aws ec2 start-instances --instance-ids $id --region $AWS_REGION
+            type=$(aws ec2 describe-instances --region ${{ secrets.AWS_REGION }} --instance-ids $id --query 'Reservations[0].Instances[0].InstanceType' --output text)
+            if [ "$type" != "t2.micro" ]; then
+              aws ec2 stop-instances --instance-ids $id --region ${{ secrets.AWS_REGION }}
+              aws ec2 wait instance-stopped --instance-ids $id --region ${{ secrets.AWS_REGION }}
+              aws ec2 modify-instance-attribute --instance-id $id --instance-type '{"Value":"t2.micro"}' --region ${{ secrets.AWS_REGION }}
+              aws ec2 start-instances --instance-ids $id --region ${{ secrets.AWS_REGION }}
             fi
-            aws ec2 terminate-instances --instance-ids $id --region $AWS_REGION
+            aws ec2 terminate-instances --instance-ids $id --region ${{ secrets.AWS_REGION }}
           done
 
   invalidate-cdn:
@@ -132,3 +130,4 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
+
