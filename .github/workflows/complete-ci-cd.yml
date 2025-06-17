@@ -76,13 +76,12 @@ jobs:
         with:
           terraform_version: '1.4.0'
 
-      - name: Checkout Terraform Infra Repository
-        uses: actions/checkout@v3
-        with:
-          repository: AdminRcvo/Rcvo-infra
-          path: infrastructure
-
+            # Code is already checked out, run Terraform on local infra directory
       - name: Terraform Init & Apply
+        working-directory: infrastructure
+        run: |
+          terraform init
+          terraform apply -auto-approve
         working-directory: infrastructure
         run: |
           terraform init
