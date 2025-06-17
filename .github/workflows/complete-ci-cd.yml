@@ -58,6 +58,7 @@ jobs:
         with:
           repository: AdminRcvo/Rcvo-infra
           path: infrastructure
+          ref: main
       - uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
