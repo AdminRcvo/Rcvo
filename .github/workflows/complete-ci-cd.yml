@@ -1,3 +1,4 @@
+```yaml
 name: Complete CI/CD
 
 on:
@@ -65,7 +66,22 @@ jobs:
           repository: AdminRcvo/rcvo-infra
           path: infrastructure
           ref: main
+
       - name: Configure AWS credentials for Infra
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.4.0'
+
+      - name: Terraform Init & Apply
+        run: |
+          cd infrastructure
           terraform init
           terraform apply -auto-approve
 
@@ -82,6 +98,7 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Cleanup & Downsize Instances
         run: |
           instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
@@ -130,4 +147,4 @@ jobs:
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
-
+```
