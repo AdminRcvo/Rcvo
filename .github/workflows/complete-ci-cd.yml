@@ -8,9 +8,9 @@ on:
     - cron: '0 0 * * *'
 
 permissions:
-  contents: write         # Publier le code
-  packages: write         # Publier sur GitHub Packages
-  id-token: write         # OIDC pour AWS
+  contents: write
+  packages: write
+  id-token: write
 
 jobs:
   build:
@@ -22,10 +22,12 @@ jobs:
         with:
           python-version: '3.x'
       - run: pip install click requests pytest black isort
-      - run: |
+      - name: Lint and format
+        run: |
           black --check .
           isort --check-only .
-      - run: |
+      - name: Run tests
+        run: |
           if ls *test*.py tests >/dev/null 2>&1; then
             pytest --maxfail=1 --disable-warnings -q
           else
@@ -42,8 +44,10 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.x'
-      - run: python -m build
-      - uses: pypa/gh-action-pypi-publish@v1.5.2
+      - name: Build package
+        run: python -m build
+      - name: Publish package
+        uses: pypa/gh-action-pypi-publish@v1.5.2
         with:
           user: __token__
           password: ${{ secrets.PYPI_TOKEN }}
@@ -53,11 +57,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout infra repository
+      - name: Checkout code into infrastructure/
         uses: actions/checkout@v3
         with:
-          repository: AdminRcvo/Rcvo-infra
           path: infrastructure
+          fetch-depth: 0
       - name: Configure AWS credentials for Infra
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -70,6 +74,8 @@ jobs:
           terraform_version: 1.4.0
       - name: Terraform Init & Apply
         working-directory: infrastructure
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           terraform init
           terraform apply -auto-approve
@@ -95,29 +101,17 @@ jobs:
             --query 'Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,Tags:Tags}'
       - name: Cleanup & Downsize
         run: |
-          for id in $(aws ec2 describe-instances \
-              --region $AWS_REGION \
-              --filters Name=instance-state-name,Values=running \
-              --query 'Reservations[].Instances[].InstanceId' --output text); do
-            tags=$(aws ec2 describe-tags \
-              --region $AWS_REGION \
-              --filters Name=resource-id,Values=$id \
-              --query 'Tags[].Key' --output text)
+          for id in $(aws ec2 describe-instances --region $AWS_REGION --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text); do
+            tags=$(aws ec2 describe-tags --region $AWS_REGION --filters Name=resource-id,Values=$id --query 'Tags[].Key' --output text)
             if echo "$tags" | grep -Eq 'Essential|Parametrage'; then
               echo "🌟 Keep $id"
               continue
             fi
-            type=$(aws ec2 describe-instances \
-              --region $AWS_REGION \
-              --instance-ids $id \
-              --query 'Reservations[0].Instances[0].InstanceType' --output text)
+            type=$(aws ec2 describe-instances --region $AWS_REGION --instance-ids $id --query 'Reservations[0].Instances[0].InstanceType' --output text)
             if [ "$type" != "t2.micro" ]; then
               aws ec2 stop-instances --instance-ids $id --region $AWS_REGION
               aws ec2 wait instance-stopped --instance-ids $id --region $AWS_REGION
-              aws ec2 modify-instance-attribute \
-                --instance-id $id \
-                --instance-type '{"Value":"t2.micro"}' \
-                --region $AWS_REGION
+              aws ec2 modify-instance-attribute --instance-id $id --instance-type '{"Value":"t2.micro"}' --region $AWS_REGION
               aws ec2 start-instances --instance-ids $id --region $AWS_REGION
             fi
           done
@@ -126,16 +120,14 @@ jobs:
     name: Invalidate CloudFront Cache
     needs: cost-optimize
     runs-on: ubuntu-latest
-    env:
-      CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
     steps:
-      - name: Create invalidation (if set)
+      - name: Invalidate CloudFront (if configured)
         run: |
-          if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
+          if [ -z "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" ]; then
             echo "ℹ️ No distribution ID, skipping"
           else
             aws cloudfront create-invalidation \
-              --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+              --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
               --paths '/*'
           fi
         shell: bash
@@ -145,8 +137,10 @@ jobs:
     needs: invalidate-cdn
     runs-on: ubuntu-latest
     steps:
-      - uses: slackapi/slack-github-action@v1.23.0
+      - name: Send Slack message
+        uses: slackapi/slack-github-action@v1.23.0
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           slack-message: "✅ Déploiement CI/CD complet !"
+```
 
