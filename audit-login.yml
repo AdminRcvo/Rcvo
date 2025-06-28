@@ -17,7 +17,7 @@ jobs:
           curl -fsSL https://www.rcvo-crm-auto.com/login.html -o login.html
           if grep -q 'NetworkError' login.html; then
             echo '🚨 NetworkError détecté, déclenche correction'
-            # ici ta commande de correction automatisée
+            # TODO: ajouter la commande de correction automatique
           else
             echo '✅ Connexion OK'
           fi
