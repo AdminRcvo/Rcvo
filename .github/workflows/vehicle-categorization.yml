@@ -1,0 +1,32 @@
+name: Vehicle Categorization
+
+on:
+  push:
+    paths:
+      - 'src/vehicles/**'
+      - '.github/workflows/vehicle-categorization.yml'
+    branches: [ main ]
+
+jobs:
+  categorize:
+    name: Générer la table de correspondance
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Installer Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+
+      - name: Générer le mapping
+        run: |
+          npm ci && npm run build:mapping
+
+      - name: Commit & Push mapping
+        run: |
+          git config user.name 'github-actions'
+          git config user.email 'actions@github.com'
+          git add src/vehicles/mapping.json
+          git commit -m '🔄 Mise à jour du mapping véhicules'
+          git push
