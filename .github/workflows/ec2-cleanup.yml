@@ -1,35 +1,34 @@
 name: EC2 Cleanup & Downsizing
 on:
   schedule:
-    - cron: '0 4 * * *'    # chaque jour à 4h UTC
+    - cron: '0 4 * * 1' # tous les lundis à 4h UTC
   workflow_dispatch:
-
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-    env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
-      - uses: actions/checkout@v3
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-      - name: Lister et downsizer les instances
+      - name: Stop instances inutiles
         run: |
           INSTANCES=$(aws ec2 describe-instances \
-            --filters Name=instance-state-name,Values=running \
-            --query 'Reservations[].Instances[?Tags[?Key==`RcvoRole`]].InstanceId' \
-            --output text)
+            --filters Name=instance-type,Values=t2.micro \
+                      Name=instance-state-name,Values=running \
+            --region "$AWS_REGION" \
+            --query 'Reservations[].Instances[?Tags[?Key==`RcvoRole`]].InstanceId' --output text)
           for ID in $INSTANCES; do
-            echo "⏸ Stopping $ID"
-            aws ec2 stop-instances --instance-ids $ID
-            aws ec2 wait instance-stopped --instance-ids $ID
-            echo "🔄 Downsizing $ID to t2.micro"
-            aws ec2 modify-instance-attribute \
-              --instance-id $ID \
-              --instance-type "{\"Value\":\"t2.micro\"}"
-            aws ec2 start-instances --instance-ids $ID
+            echo "⏹️ Arrêt de $ID"
+            aws ec2 stop-instances --instance-ids "$ID" --region "$AWS_REGION"
+          done
+      - name: Change type si arrêté
+        run: |
+          STOPPED=$(aws ec2 describe-instances \
+            --filters Name=instance-state-name,Values=stopped \
+                      Name=instance-type,Values=t2.micro \
+            --region "$AWS_REGION" \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          for ID in $STOPPED; do
+            echo "⚙️ Passage en t3.micro pour $ID"
+            aws ec2 modify-instance-attribute --instance-id "$ID" --instance-type '{"Value":"t3.micro"}' --region "$AWS_REGION"
+            aws ec2 start-instances --instance-ids "$ID" --region "$AWS_REGION"
           done
