@@ -1,25 +1,23 @@
 name: Audit & Correction Connexion
 on:
   schedule:
-    - cron: '0 3 * * *'  # chaque jour à 3h UTC
+    - cron: '0 2 * * *' # tous les jours à 2h UTC
   workflow_dispatch:
 jobs:
   audit-login:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Audit de la page de connexion
+      - name: Vérifier page login
         run: |
-          curl -fsSL https://www.rcvo-crm-auto.com/login.html -o login.html
-          if grep -q 'NetworkError' login.html; then
-            echo '🚨 NetworkError détecté, correction automatique à implémenter'
-          else
-            echo '✅ Connexion OK'
+          curl -fsSL https://www.rcvo-crm-auto.com/login.html || exit 1
+      - name: Corriger route si erreur
+        run: |
+          if [ $? -ne 0 ]; then
+            sed -i 's/login_v2/login/g' public/login_v2.html
+            git config user.name 'github-actions'
+            git config user.email 'actions@github.com'
+            git add public/login_v2.html
+            git commit -m '🔧 Correction connexion: relocalisation login'
+            git push
           fi
-      - name: Commit corrections
-        run: |
-          git config user.name 'github-actions'
-          git config user.email 'actions@github.com'
-          git add public/login.html || echo "Fichier non modifié"
-          git commit -m '♻️ Correction audit login' || echo "Aucun commit nécessaire"
-          git push || echo "Push optionnel"
