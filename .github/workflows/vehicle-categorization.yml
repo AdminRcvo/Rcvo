@@ -21,7 +21,8 @@ jobs:
 
       - name: Générer le mapping
         run: |
-          npm ci && npm run build:mapping
+          npm install
+          npm run build:mapping
 
       - name: Commit & Push mapping
         run: |
