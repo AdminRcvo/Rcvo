@@ -3,8 +3,7 @@ name: Complete CI & Deploy
 on:
   push:
     branches: [ main ]
-  push:
-    tags: [ 'v*.*.*' ]
+    tags:    [ 'v*.*.*' ]
 
 jobs:
   audit-and-test:
