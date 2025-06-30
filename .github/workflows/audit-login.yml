@@ -1,7 +1,7 @@
-name: Audit & Correction Connexion
+name: "Audit & Correction Connexion"
 on:
   schedule:
-    - cron: '0 2 * * *' # tous les jours à 2h UTC
+    - cron: '0 2 * * *'  # tous les jours à 2h UTC
   workflow_dispatch:
 jobs:
   audit-login:
@@ -10,10 +10,12 @@ jobs:
       - uses: actions/checkout@v3
       - name: Vérifier page login
         run: |
-          curl -fsSL https://www.rcvo-crm-auto.com/login.html || exit 1
+          # tester l'URL correcte
+          curl -fsSL https://www.rcvo-crm-auto.com/login_v2.html || exit 1
       - name: Corriger route si erreur
         run: |
           if [ $? -ne 0 ]; then
+            # remplacer référence login_v2 par login
             sed -i 's/login_v2/login/g' public/login_v2.html
             git config user.name 'github-actions'
             git config user.email 'actions@github.com'
