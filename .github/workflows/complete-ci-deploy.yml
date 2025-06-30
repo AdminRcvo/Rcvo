@@ -1,0 +1,32 @@
+name: Complete CI & Deploy
+
+on:
+  push:
+    branches: [ main ]
+  push:
+    tags: [ 'v*.*.*' ]
+
+jobs:
+  audit-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+      - name: Audit & Tests
+        run: ./audit_rcvo.sh
+
+  deploy-staging:
+    needs: audit-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build & Push Docker
+        run: |
+          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+          docker build -t rcvo/staging:latest .
+          docker push rcvo/staging:latest
+      - name: Déployer sur le serveur de staging
+        run: |
+          ssh -o StrictHostKeyChecking=no $STAGING_USER@$STAGING_HOST "docker pull rcvo/staging:latest && docker-compose up -d"
