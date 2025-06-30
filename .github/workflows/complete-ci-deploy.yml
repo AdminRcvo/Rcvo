@@ -28,4 +28,5 @@ jobs:
           docker push rcvo/staging:latest
       - name: Déployer sur le serveur de staging
         run: |
-          ssh -o StrictHostKeyChecking=no $STAGING_USER@$STAGING_HOST "docker pull rcvo/staging:latest && docker-compose up -d"
+          ssh -o StrictHostKeyChecking=no $STAGING_USER@$STAGING_HOST \
+            "docker pull rcvo/staging:latest && docker-compose up -d"
