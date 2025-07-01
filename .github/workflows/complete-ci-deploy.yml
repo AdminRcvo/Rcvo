@@ -4,9 +4,14 @@ on:
   push:
     branches: [ main ]
     tags:    [ 'v*.*.*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
 
 jobs:
-    audit-and-test:
+  audit-and-test:
     name: Audit & Tests
     runs-on: ubuntu-latest
     steps:
@@ -18,25 +23,57 @@ jobs:
         with:
           node-version: '16'
 
-      # ⚙️ Rendre le script d’audit exécutable
       - name: Rendre audit_rcvo.sh exécutable
         run: chmod +x ./audit_rcvo.sh
 
       - name: Audit & Tests
         run: ./audit_rcvo.sh
 
-
   deploy-staging:
+    name: Déployer sur staging
     needs: audit-and-test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
+
       - name: Build & Push Docker
         run: |
-          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
           docker build -t rcvo/staging:latest .
           docker push rcvo/staging:latest
+
       - name: Déployer sur le serveur de staging
-        run: |
-          ssh -o StrictHostKeyChecking=no $STAGING_USER@$STAGING_HOST \
-            "docker pull rcvo/staging:latest && docker-compose up -d"
+        uses: appleboy/ssh-action@v0.1.4
+        with:
+          host:     ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key:      ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/rcvo-staging
+            docker pull rcvo/staging:latest
+            docker-compose down
+            docker-compose up -d
+
+  deploy-production:
+    name: Déployer sur production
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Déployer sur la production
+        uses: appleboy/ssh-action@v0.1.4
+        with:
+          host:     ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key:      ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/rcvo
+            docker pull rcvo/prod:${{ github.ref_name }}
+            docker-compose down
+            docker-compose up -d
+
+      - name: Vérifier la production
+        run: ./ci/verify_prod.sh
