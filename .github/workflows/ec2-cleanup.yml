@@ -1,38 +1,34 @@
 name: EC2 Cleanup & Downsizing
 
-# Triggers : tous les lundis à 04:00 UTC + possibilité de déclencher manuellement
 on:
-  schedule:
-    - cron: '0 4 * * 1'
   workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'  # chaque jour à 02:00 UTC
 
 jobs:
   cleanup:
+    name: Nettoyage et redimensionnement des instances
     runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ secrets.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Cleanup & Downsizing
+      - name: Déterminer les instances à garder
+        id: keep
         run: |
-          # 1) Déterminer 4 instances essentielles par tag Name
           roles=(Rcvo-Serveur Rcvo-Backend-lb Rcvo-Backend-env rcvo-backend-prod)
           keep_ids=()
           for role in "${roles[@]}"; do
             id=$(aws ec2 describe-instances \
               --filters Name=instance-state-name,Values=running Name=tag:Name,Values="$role" \
-              --region "$AWS_REGION" \
-              --query 'sort_by(Reservations[].Instances[], &LaunchTime)[0].InstanceId' \
-              --output text)
+              --query 'sort_by(Reservations[].Instances[], &LaunchTime)[-1].InstanceId' \
+              --output text --region $AWS_REGION)
             if [[ "$id" != "None" ]]; then
               echo "⭐️ Garder $role → $id"
               keep_ids+=("$id")
@@ -40,22 +36,25 @@ jobs:
               echo "⚠️ Aucun running trouvé pour $role"
             fi
           done
+          echo "::set-output name=ids::${keep_ids[*]}"
 
-          # 2) Lister toutes les instances en running
+      - name: Cleanup & Downsize
+        run: |
+          keep_ids=(${{ steps.keep.outputs.ids }})
+          echo "Instances à garder: ${keep_ids[*]}"
+
           all_ids=($(aws ec2 describe-instances \
             --filters Name=instance-state-name,Values=running \
-            --region "$AWS_REGION" \
             --query 'Reservations[].Instances[].InstanceId' \
-            --output text))
+            --output text --region $AWS_REGION))
 
-          # 3) Pour chaque instance, soit on downsize en t2.micro, soit on termine
           for id in "${all_ids[@]}"; do
-            if [[ " ${keep_ids[*]} " =~ " ${id} " ]]; then
+            if [[ " ${keep_ids[*]} " =~ " $id " ]]; then
+              # Si pas en t2.micro → downsize
               type=$(aws ec2 describe-instances \
                 --instance-ids "$id" \
-                --region "$AWS_REGION" \
                 --query 'Reservations[0].Instances[0].InstanceType' \
-                --output text)
+                --output text --region $AWS_REGION)
               if [[ "$type" != "t2.micro" ]]; then
                 echo "🔄 Downsize $id de $type → t2.micro"
                 aws ec2 stop-instances --instance-ids "$id" --region "$AWS_REGION"
