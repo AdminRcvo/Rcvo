@@ -1,51 +1,74 @@
-name: "EC2 Cleanup & Downsizing"
+name: EC2 Cleanup & Downsizing
+
+# Triggers : tous les lundis à 04:00 UTC + possibilité de déclencher manuellement
 on:
   schedule:
-    - cron: '0 4 * * 1'  # tous les lundis à 4h UTC
+    - cron: '0 4 * * 1'
   workflow_dispatch:
-env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
+
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-      - name: Cleanup & Downsize
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Cleanup & Downsizing
         run: |
-          # 1) Déterminer 4 instances essentielles
+          # 1) Déterminer 4 instances essentielles par tag Name
           roles=(Rcvo-Serveur Rcvo-Backend-lb Rcvo-Backend-env rcvo-backend-prod)
           keep_ids=()
           for role in "${roles[@]}"; do
             id=$(aws ec2 describe-instances \
-              --filters Name=instance-state-name,Values=running Name=tag:RcvoRole,Values="$role" \
-              --region "$AWS_REGION" --query 'Reservations[0].Instances[0].InstanceId' --output text)
-            [[ "$id" != "None" ]] && keep_ids+=("$id")
+              --filters Name=instance-state-name,Values=running Name=tag:Name,Values="$role" \
+              --region "$AWS_REGION" \
+              --query 'sort_by(Reservations[].Instances[], &LaunchTime)[0].InstanceId' \
+              --output text)
+            if [[ "$id" != "None" ]]; then
+              echo "⭐️ Garder $role → $id"
+              keep_ids+=("$id")
+            else
+              echo "⚠️ Aucun running trouvé pour $role"
+            fi
           done
 
-          # 2) Lister toutes les instances "running"
-          all_ids=( $(aws ec2 describe-instances \
+          # 2) Lister toutes les instances en running
+          all_ids=($(aws ec2 describe-instances \
             --filters Name=instance-state-name,Values=running \
-            --region "$AWS_REGION" --query 'Reservations[].Instances[].InstanceId' --output text) )
+            --region "$AWS_REGION" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text))
 
-          # 3) Conserver, downsizer ou terminer
+          # 3) Pour chaque instance, soit on downsize en t2.micro, soit on termine
           for id in "${all_ids[@]}"; do
-            if [[ " ${keep_ids[*]} " =~ " $id " ]]; then
-              type=$(aws ec2 describe-instances --instance-ids "$id" --region "$AWS_REGION" \
-                --query 'Reservations[0].Instances[0].InstanceType' --output text)
-              if [ "$type" != "t2.micro" ]; then
+            if [[ " ${keep_ids[*]} " =~ " ${id} " ]]; then
+              type=$(aws ec2 describe-instances \
+                --instance-ids "$id" \
+                --region "$AWS_REGION" \
+                --query 'Reservations[0].Instances[0].InstanceType' \
+                --output text)
+              if [[ "$type" != "t2.micro" ]]; then
+                echo "🔄 Downsize $id de $type → t2.micro"
                 aws ec2 stop-instances --instance-ids "$id" --region "$AWS_REGION"
                 aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION"
-                aws ec2 modify-instance-attribute --instance-id "$id" \
-                  --instance-type '{"Value":"t2.micro"}' --region "$AWS_REGION"
+                aws ec2 modify-instance-attribute --instance-id "$id" --instance-type "{\"Value\":\"t2.micro\"}" --region "$AWS_REGION"
                 aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
+                aws ec2 wait instance-running --instance-ids "$id" --region "$AWS_REGION"
+              else
+                echo "✅ $id est déjà en t2.micro"
               fi
             else
+              echo "🗑️ Terminate $id"
               aws ec2 terminate-instances --instance-ids "$id" --region "$AWS_REGION"
+              aws ec2 wait instance-terminated --instance-ids "$id" --region "$AWS_REGION"
             fi
           done
