@@ -11,13 +11,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - uses: actions/setup-node@v3
         with:
           node-version: '16'
+
+      - name: Rendre le script d’audit exécutable
+        run: chmod +x audit_rcvo.sh
+
       - name: Audit & Tests
-        run: |
-          # Assurez-vous que votre script audit_rcvo.sh est exécutable (chmod +x)
-          ./audit_rcvo.sh
+        run: ./audit_rcvo.sh
 
   deploy-staging:
     name: Déployer sur staging
