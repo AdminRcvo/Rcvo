@@ -52,7 +52,7 @@ jobs:
           user: __token__
           password: ${{ secrets.PYPI_TOKEN }}
 
-  deploy-infra:
+    deploy-infra:
     name: Deploy Infrastructure
     needs: build
     runs-on: ubuntu-latest
@@ -67,20 +67,21 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: '1.4.0'
+          terraform_version: '1.5.5'   # ← mis à jour
 
       - name: Terraform Init & Apply
         working-directory: infrastructure/instances
         run: |
           terraform init
           terraform apply -auto-approve
+
 
   cost-optimize:
     name: AWS Cost Optimization
