@@ -6,13 +6,22 @@ on:
     tags:    [ 'v*.*.*' ]
 
 jobs:
-  audit-and-test:
+    audit-and-test:
+    name: Audit & Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
         with:
           node-version: '16'
+
+      # ⚙️ Rendre le script d’audit exécutable
+      - name: Rendre audit_rcvo.sh exécutable
+        run: chmod +x ./audit_rcvo.sh
+
       - name: Audit & Tests
         run: ./audit_rcvo.sh
 
