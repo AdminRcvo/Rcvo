@@ -12,14 +12,19 @@ jobs:
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
 
+    defaults:
+      run:
+        shell: bash
+        working-directory: backend/terraform/modules/cost-optimizer
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Debug workspace
         run: |
-          echo "Listing workspace contents:"
-          ls -R .
+          echo "Root contents:" && ls -1
+          echo "Modules folder:" && ls -1 backend/terraform/modules
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
@@ -28,8 +33,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
-      - name: Run Terraform Apply (cost-optimizer)
-        working-directory: ./backend/terraform/modules/cost-optimizer
+      - name: Terraform Init & Apply
         run: |
           terraform init -input=false
           terraform apply -auto-approve -var "private_subnet_id=${{ secrets.PRIVATE_SUBNET_ID }}"
