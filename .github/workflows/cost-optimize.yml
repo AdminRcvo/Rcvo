@@ -22,7 +22,7 @@ jobs:
           echo "=== Racine du dépôt ==="
           ls -R .
 
-      # 3. Vérification de l’existence du module
+      # 3. Vérification de l’existence du module Terraform
       - name: Verify cost-optimizer module exists
         run: |
           if [ ! -d backend/terraform/modules/cost-optimizer ]; then
@@ -36,15 +36,15 @@ jobs:
         with:
           terraform_version: "latest"
 
-      # 5. Terraform Init (dans backend/terraform)
+      # 5. Terraform Init dans backend/terraform
       - name: Terraform Init
-        working-directory: backend/terraform
         run: terraform init
-
-      # 6. Terraform Apply (dans backend/terraform)
-      - name: Terraform Apply
         working-directory: backend/terraform
+
+      # 6. Terraform Apply dans backend/terraform
+      - name: Terraform Apply
         run: terraform apply -auto-approve
+        working-directory: backend/terraform
 
       # 7. Nettoyage des volumes EBS non attachés
       - name: Cleanup unattached EBS volumes
