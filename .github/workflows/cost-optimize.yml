@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Récupérer le code
+      # 1. Checkout du code
       - name: Checkout repository
         uses: actions/checkout@v3
 
@@ -36,29 +36,26 @@ jobs:
         with:
           terraform_version: "latest"
 
-      # 5. Terraform Init dans backend/terraform
-      - name: Terraform Init
-        working-directory: backend/terraform
-        run: terraform init
+      # 5. Terraform Init & Apply dans backend/terraform
+      - name: Terraform Init & Apply
+        run: |
+          cd backend/terraform
+          terraform init
+          terraform apply -auto-approve
 
-      # 6. Terraform Apply dans backend/terraform
-      - name: Terraform Apply
-        working-directory: backend/terraform
-        run: terraform apply -auto-approve
-
-      # 7. Nettoyer les EBS volumes non attachés
+      # 6. Nettoyer les volumes EBS non attachés
       - name: Cleanup unattached EBS volumes
         run: |
           echo "Cleaning unattached EBS volumes"
           # votre script ici...
 
-      # 8. Libérer les Elastic IPs inutilisées
+      # 7. Libérer les Elastic IPs inutilisées
       - name: Release unused Elastic IPs
         run: |
           echo "Releasing unused Elastic IPs"
           # votre script ici...
 
-      # 9. Convertir les ASG de test en Spot
+      # 8. Convertir les ASG de test en Spot
       - name: Convert test ASG to Spot
         run: |
           echo "Converting test ASG to Spot"
