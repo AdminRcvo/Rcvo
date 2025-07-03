@@ -12,17 +12,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout du code
+      # 1. Récupérer le code
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      # 2. Debug : liste récursive du workspace
+      # 2. Debug : afficher la structure de fichiers
       - name: Debug folder layout
         run: |
           echo "=== Racine du dépôt ==="
           ls -R .
 
-      # 3. Vérification de l’existence du module Terraform
+      # 3. Vérifier que le module existe
       - name: Verify cost-optimizer module exists
         run: |
           if [ ! -d backend/terraform/modules/cost-optimizer ]; then
@@ -30,7 +30,7 @@ jobs:
             exit 1
           fi
 
-      # 4. Installation de Terraform
+      # 4. Installer Terraform
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
@@ -38,27 +38,27 @@ jobs:
 
       # 5. Terraform Init dans backend/terraform
       - name: Terraform Init
-        run: terraform init
         working-directory: backend/terraform
+        run: terraform init
 
       # 6. Terraform Apply dans backend/terraform
       - name: Terraform Apply
-        run: terraform apply -auto-approve
         working-directory: backend/terraform
+        run: terraform apply -auto-approve
 
-      # 7. Nettoyage des volumes EBS non attachés
+      # 7. Nettoyer les EBS volumes non attachés
       - name: Cleanup unattached EBS volumes
         run: |
           echo "Cleaning unattached EBS volumes"
           # votre script ici...
 
-      # 8. Libération des Elastic IPs inutilisées
+      # 8. Libérer les Elastic IPs inutilisées
       - name: Release unused Elastic IPs
         run: |
           echo "Releasing unused Elastic IPs"
           # votre script ici...
 
-      # 9. Conversion des ASG de test en Spot
+      # 9. Convertir les ASG de test en Spot
       - name: Convert test ASG to Spot
         run: |
           echo "Converting test ASG to Spot"
