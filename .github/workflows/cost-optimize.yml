@@ -1,19 +1,29 @@
+name: Cost Optimization
+
+# 1. Déclencheurs : à chaque push sur main, et manuellement via "Run workflow"
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
 jobs:
   cost-optimization:
     name: Cost Optimization
     runs-on: ubuntu-latest
 
     steps:
+      # 2. Checkout du code
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      # --- PASSE DE DEBUG ---
+      # 3. Debug : liste récursive des fichiers du workspace
       - name: Debug folder layout
         run: |
           echo "=== Racine du dépôt ==="
           ls -R .
 
-      # --- VÉRIFICATION DU MODULE ---
+      # 4. Vérification du module Terraform
       - name: Verify cost-optimizer module exists
         run: |
           if [ ! -d backend/terraform/modules/cost-optimizer ]; then
@@ -21,7 +31,7 @@ jobs:
             exit 1
           fi
 
-      # --- SUITE DU PIPELINE ---
+      # 5. Configuration AWS
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -29,19 +39,27 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: eu-west-1
 
+      # 6. Terraform Init & Apply
       - name: Terraform Init & Apply
         run: |
           cd backend/terraform
           terraform init
           terraform apply -auto-approve
 
+      # 7. Cleanup unattached EBS volumes
       - name: Cleanup unattached EBS volumes
-        run: ... 
+        run: |
+          # votre script ici...
+          echo "Cleaning unattached EBS volumes"
 
+      # 8. Release unused Elastic IPs
       - name: Release unused Elastic IPs
-        run: ... 
+        run: |
+          # votre script ici...
+          echo "Releasing unused Elastic IPs"
 
+      # 9. Convert test ASG to Spot
       - name: Convert test ASG to Spot
-        run: ...
-
-    # éventuels autres jobs ou steps...
+        run: |
+          # votre script ici...
+          echo "Converting test ASG to Spot"
