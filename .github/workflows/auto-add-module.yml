@@ -1,0 +1,25 @@
+name: Auto-Add Cost-Optimizer Module
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  ensure-module:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Copy template if missing
+        run: |
+          if [ ! -d backend/terraform/modules/cost-optimizer ]; then
+            echo "Module cost-optimizer manquant, création depuis templates..."
+            cp -R backend/terraform/templates/cost-optimizer backend/terraform/modules/cost-optimizer
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add backend/terraform/modules/cost-optimizer
+            git commit -m "chore: add missing cost-optimizer module"
+            git push
+          else
+            echo "Module déjà présent."
+          fi
