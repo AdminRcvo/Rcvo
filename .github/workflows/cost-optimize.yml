@@ -1,21 +1,19 @@
-name: Cost Optimization
-
-on:
-  workflow_dispatch:        # permet un lancement manuel
-  schedule:
-    - cron: '0 6 * * MON'   # tous les lundis à 8h UTC (10h CEST)
-
 jobs:
-  cost-optimize:
+  cost-optimization:
     name: Cost Optimization
     runs-on: ubuntu-latest
-    env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      # --- PASSE DE DEBUG ---
+      - name: Debug folder layout
+        run: |
+          echo "=== Racine du dépôt ==="
+          ls -R .
+
+      # --- VÉRIFICATION DU MODULE ---
       - name: Verify cost-optimizer module exists
         run: |
           if [ ! -d backend/terraform/modules/cost-optimizer ]; then
@@ -23,43 +21,27 @@ jobs:
             exit 1
           fi
 
-      - name: Debug workspace (root)
-        run: |
-          echo "Root contents:" && ls -R .
-
+      # --- SUITE DU PIPELINE ---
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          aws-region: eu-west-1
 
       - name: Terraform Init & Apply
-        working-directory: backend/terraform/modules/cost-optimizer
         run: |
-          echo "Working directory:" && pwd
-          echo "Module contents:" && ls -R .
-          terraform init -input=false
-          terraform apply -auto-approve \
-            -var "private_subnet_id=${{ secrets.PRIVATE_SUBNET_ID }}"
+          cd backend/terraform
+          terraform init
+          terraform apply -auto-approve
 
       - name: Cleanup unattached EBS volumes
-        run: |
-          for vol in $(aws ec2 describe-volumes \
-            --filters Name=status,Values=available \
-            --query "Volumes[].VolumeId" --output text); do
-            aws ec2 delete-volume --volume-id $vol || true
-          done
+        run: ... 
 
       - name: Release unused Elastic IPs
-        run: |
-          for aip in $(aws ec2 describe-addresses \
-            --query "Addresses[?AssociationId=='null'].AllocationId" --output text); do
-            aws ec2 release-address --allocation-id $aip || true
-          done
+        run: ... 
 
       - name: Convert test ASG to Spot
-        run: |
-          aws autoscaling update-auto-scaling-group \
-            --auto-scaling-group-name rcvo-test-asg \
-            --mixed-instances-policy file://test-asg-spot-policy.json || true
+        run: ...
+
+    # éventuels autres jobs ou steps...
