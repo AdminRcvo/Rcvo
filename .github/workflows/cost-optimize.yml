@@ -16,6 +16,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Verify cost-optimizer module exists
+        run: |
+          if [ ! -d backend/terraform/modules/cost-optimizer ]; then
+            echo "❌ Erreur : module cost-optimizer introuvable !"
+            exit 1
+          fi
+
       - name: Debug workspace (root)
         run: |
           echo "Root contents:" && ls -R .
@@ -33,7 +40,8 @@ jobs:
           echo "Working directory:" && pwd
           echo "Module contents:" && ls -R .
           terraform init -input=false
-          terraform apply -auto-approve -var "private_subnet_id=${{ secrets.PRIVATE_SUBNET_ID }}"
+          terraform apply -auto-approve \
+            -var "private_subnet_id=${{ secrets.PRIVATE_SUBNET_ID }}"
 
       - name: Cleanup unattached EBS volumes
         run: |
