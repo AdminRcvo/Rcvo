@@ -1,172 +1,54 @@
-name: Complete CI CD
+name: Complete CI/CD
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * *'
-
-permissions:
-  contents: write
-  packages: write
-  id-token: write
 
 jobs:
-  build:
-    name: Build & Test
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-      - run: pip install click requests pytest black isort
-      - name: Lint and format
-        run: |
-          black --check .
-          isort --check-only .
-      - name: Run tests
-        run: |
-          if ls *test*.py tests >/dev/null 2>&1; then
-            pytest --maxfail=1 --disable-warnings -q
-          else
-            echo "ℹ️ No tests found, skipping"
-          fi
+      - uses: actions/setup-node@v3
+        with: { node-version: '18' }
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
 
-  publish-pypi:
-    name: Publish to PyPI
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+  cd:
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-      - name: Build package
-        run: python -m build
-      - name: Publish package
-        uses: pypa/gh-action-pypi-publish@v1.5.2
-        with:
-          user: __token__
-          password: ${{ secrets.PYPI_TOKEN }}
-
-    deploy-infra:
-    name: Deploy Infrastructure
-    needs: build
-    runs-on: ubuntu-latest
-    env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: '1.5.5'   # ← mis à jour
+          terraform_version: 'latest'
 
-      - name: Terraform Init & Apply
-        working-directory: infrastructure/instances
+      - name: Terraform Init & Plan
         run: |
+          cd infrastructure/terraform
           terraform init
+          terraform plan
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cd infrastructure/terraform
           terraform apply -auto-approve
 
-
-  cost-optimize:
-    name: AWS Cost Optimization
-    needs: deploy-infra
-    runs-on: ubuntu-latest
-    env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+      - name: Deploy application
+        uses: appleboy/ssh-action@v0.1.6
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Cleanup & Downsize Instances
-        run: |
-          # 1) Déterminer les 4 instances essentielles (serveur, lb, env, prod)
-          roles=(Rcvo-Serveur Rcvo-Backend-lb Rcvo-Backend-env rcvo-backend-prod)
-          keep_ids=()
-          for role in "${roles[@]}"; do
-            id=$(aws ec2 describe-instances \
-              --filters Name=instance-state-name,Values=running Name=tag:Name,Values="$role" \
-              --region "$AWS_REGION" \
-              --query 'sort_by(Reservations[].Instances[], &LaunchTime)[0].InstanceId' \
-              --output text)
-            if [ "$id" != "None" ]; then
-              echo "⭐️ Garder $role → $id"
-              keep_ids+=("$id")
-            else
-              echo "⚠️ Aucun running trouvé pour $role"
-            fi
-          done
-
-          # 2) Lister toutes les instances en running
-          all_ids=($(aws ec2 describe-instances \
-            --filters Name=instance-state-name,Values=running \
-            --region "$AWS_REGION" \
-            --query 'Reservations[].Instances[].InstanceId' --output text))
-
-          # 3) Processus : conserver ou downsize/terminate
-          for id in "${all_ids[@]}"; do
-            if [[ " ${keep_ids[*]} " =~ " ${id} " ]]; then
-              type=$(aws ec2 describe-instances --instance-ids "$id" --region "$AWS_REGION" --query 'Reservations[0].Instances[0].InstanceType' --output text)
-              if [ "$type" != "t2.micro" ]; then
-                echo "🔄 Downsize $id de $type → t2.micro"
-                aws ec2 stop-instances --instance-ids "$id" --region "$AWS_REGION"
-                aws ec2 wait instance-stopped --instance-ids "$id" --region "$AWS_REGION"
-                aws ec2 modify-instance-attribute --instance-id "$id" --instance-type "{\"Value\":\"t2.micro\"}" --region "$AWS_REGION"
-                aws ec2 start-instances --instance-ids "$id" --region "$AWS_REGION"
-                aws ec2 wait instance-running --instance-ids "$id" --region "$AWS_REGION"
-              else
-                echo "✅ $id est déjà en t2.micro"
-              fi
-            else
-              echo "🗑️  Terminate $id"
-              aws ec2 terminate-instances --instance-ids "$id" --region "$AWS_REGION"
-              aws ec2 wait instance-terminated --instance-ids "$id" --region "$AWS_REGION"
-            fi
-          done
-
-  invalidate-cdn:
-    name: Invalidate CloudFront Cache
-    needs: cost-optimize
-    runs-on: ubuntu-latest
-    env:
-      CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
-    steps:
-      - name: Invalidate distribution (if configured)
-        run: |
-          if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
-            echo "ℹ️ No distribution ID, skipping"
-          else
-            aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths '/*'
-          fi
-
-  notify:
-    name: Notify Slack
-    needs: invalidate-cdn
-    runs-on: ubuntu-latest
-    env:
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-    steps:
-      - name: Send Slack message
-        uses: slackapi/slack-github-action@v1.23.0
-        with:
-          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
-          slack-message: "✅ Déploiement CI/CD complet !"
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd /var/www/rcvo
+            git pull origin main
+            npm install --production
+            pm2 restart all
