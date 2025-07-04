@@ -2,61 +2,53 @@ name: Cost Optimization
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   cost-optimization:
-    name: Cost Optimization
     runs-on: ubuntu-latest
-
     steps:
-      # 1. Checkout du code
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
-      # 2. Debug : afficher la structure de fichiers
       - name: Debug folder layout
-        run: |
-          echo "=== Racine du dépôt ==="
-          ls -R .
+        run: ls -R .
 
-      # 3. Vérifier que le module existe
       - name: Verify cost-optimizer module exists
         run: |
           if [ ! -d backend/terraform/modules/cost-optimizer ]; then
-            echo "❌ Erreur : module cost-optimizer introuvable !"
-            exit 1
+            echo "Module missing!" && exit 1
           fi
 
-      # 4. Installer Terraform
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: "latest"
+          terraform_version: 'latest'
 
-      # 5. Terraform Init & Apply dans backend/terraform
       - name: Terraform Init & Apply
         run: |
           cd backend/terraform
           terraform init
           terraform apply -auto-approve
 
-      # 6. Nettoyer les volumes EBS non attachés
       - name: Cleanup unattached EBS volumes
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id:   ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+      - name: Delete unused EBS volumes
         run: |
-          echo "Cleaning unattached EBS volumes"
-          # votre script ici...
+          vols=$(aws ec2 describe-volumes --filters Name=status,Values=available --query "Volumes[].VolumeId" --output text)
+          for v in $vols; do aws ec2 delete-volume --volume-id $v || true; done
 
-      # 7. Libérer les Elastic IPs inutilisées
       - name: Release unused Elastic IPs
         run: |
-          echo "Releasing unused Elastic IPs"
-          # votre script ici...
+          eips=$(aws ec2 describe-addresses --filters Name=instance-id,Values=null --query "Addresses[].AllocationId" --output text)
+          for e in $eips; do aws ec2 release-address --allocation-id $e || true; done
 
-      # 8. Convertir les ASG de test en Spot
       - name: Convert test ASG to Spot
         run: |
-          echo "Converting test ASG to Spot"
-          # votre script ici...
+          # ici votre logique AWS CLI pour les ASG
+          echo "Converting ASG to Spot"
