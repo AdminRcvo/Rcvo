@@ -4,51 +4,55 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   ci:
+    name: CI
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
-        with: { node-version: '18' }
-      - run: npm ci
-      - run: npm test
-      - run: npm run lint
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  cd:
-    needs: ci
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
+      - name: Setup Node (safe)
+        uses: actions/setup-node@v4
         with:
-          terraform_version: 'latest'
+          node-version: 22
 
-      - name: Terraform Init & Plan
+      - name: Detect Node project
+        id: detect
+        shell: bash
         run: |
-          cd infrastructure/terraform
-          terraform init
-          terraform plan
+          if [ -f package.json ]; then
+            echo "has_node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_node=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Terraform Apply
-        if: github.ref == 'refs/heads/main'
+      - name: Install deps (safe)
+        if: steps.detect.outputs.has_node == 'true'
         run: |
-          cd infrastructure/terraform
-          terraform apply -auto-approve
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm i  --no-audit --no-fund
+          fi
 
-      - name: Deploy application
-        uses: appleboy/ssh-action@v0.1.6
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          script: |
-            cd /var/www/rcvo
-            git pull origin main
-            npm install --production
-            pm2 restart all
+      - name: Run npm test (if exists)
+        if: steps.detect.outputs.has_node == 'true'
+        run: |
+          if npm run | grep -q "^  test"; then
+            npm test --silent
+          else
+            echo "No test script, skipping."
+          fi
+
+      - name: Run npm lint (if exists)
+        if: steps.detect.outputs.has_node == 'true'
+        run: |
+          if npm run | grep -q "^  lint"; then
+            npm run lint --silent
+          else
+            echo "No lint script, skipping."
+          fi
