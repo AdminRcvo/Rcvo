@@ -31,13 +31,13 @@ jobs:
             echo "has_node=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Installer dépendances
+      - name: Installer dépendances (safe)
         if: ${{ steps.detect.outputs.has_node == 'true' }}
         run: |
           if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
             npm ci --no-audit --no-fund
           else
-            npm i --no-audit --no-fund
+            npm i  --no-audit --no-fund
           fi
 
       - name: Build (si script existe)
@@ -73,36 +73,66 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Vérifier secrets
+      # --- Évaluer la présence des secrets DOCKER (sans les mettre dans l'expression du YAML)
+      - name: Évaluer secrets Docker
+        id: eval_docker
+        env:
+          DU: ${{ secrets.DOCKER_USERNAME }}
+          DP: ${{ secrets.DOCKER_PASSWORD }}
+          DI: ${{ secrets.DOCKER_IMAGE }}
         run: |
-          if [ -z "${{ secrets.DOCKER_USERNAME }}" ] || [ -z "${{ secrets.DOCKER_PASSWORD }}" ]; then
-            echo "⚠️ Secrets Docker manquants → on saute le déploiement."
-            exit 0
+          if [ -n "${DU}" ] && [ -n "${DP}" ]; then
+            echo "go=true"  >> "$GITHUB_OUTPUT"
+            echo "image=${DI:-rcvo/app}" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Log info
+        run: |
+          echo "Docker prêt ? ${{ steps.eval_docker.outputs.go }}"
+
       - name: Checkout
+        if: ${{ steps.eval_docker.outputs.go == 'true' }}
         uses: actions/checkout@v4
 
       - name: Télécharger l’artifact
+        if: ${{ steps.eval_docker.outputs.go == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: build-artifact
           path: .
 
       - name: Docker login
+        if: ${{ steps.eval_docker.outputs.go == 'true' }}
         run: |
           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
       - name: Build & Push Docker
+        if: ${{ steps.eval_docker.outputs.go == 'true' }}
         env:
-          IMAGE: ${{ secrets.DOCKER_IMAGE || 'rcvo/app' }}
+          IMAGE: ${{ steps.eval_docker.outputs.image }}
           TAG:   ${{ github.sha }}
         run: |
           docker build -t "$IMAGE:$TAG" .
           docker push "$IMAGE:$TAG"
 
+      # --- Évaluer la présence des secrets SSH, puis conditionner la step SSH sur l'output
+      - name: Évaluer secrets SSH
+        id: eval_ssh
+        env:
+          SH: ${{ secrets.SSH_HOST }}
+          SU: ${{ secrets.SSH_USER }}
+          SK: ${{ secrets.SSH_KEY }}
+        run: |
+          if [ -n "${SH}" ] && [ -n "${SU}" ] && [ -n "${SK}" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Déploiement SSH (optionnel)
-        if: ${{ secrets.SSH_HOST != '' && secrets.SSH_USER != '' && secrets.SSH_KEY != '' }}
+        if: ${{ steps.eval_ssh.outputs.go == 'true' && steps.eval_docker.outputs.go == 'true' }}
         uses: appleboy/ssh-action@v0.1.10
         with:
           host: ${{ secrets.SSH_HOST }}
