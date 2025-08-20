@@ -5,14 +5,18 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'qcm/categories.json'
+      - 'src/vehicles/**'
+      - 'qcm/**'
+      - 'scripts/**'
       - '.github/workflows/vehicle-categorization.yml'
 
 jobs:
   categorize:
+    name: Générer la table de correspondance
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # pour pouvoir commit/push le mapping
+      contents: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,5 +24,51 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      # AUCUN npm, AUCUN docker, AUCUN terraform.
-      # Sc
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Installe proprement, que tu aies (ou non) un lockfile
+      - name: Installer dépendances (safe)
+        run: |
+          if [ ! -f package.json ]; then
+            echo "❌ package.json introuvable à la racine du repo."
+            exit 2
+          fi
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm i  --no-audit --no-fund
+          fi
+
+      # Lance le script uniquement s'il existe
+      - name: Générer le mapping (npm run build:mapping)
+        run: |
+          if npm run | grep -q "^  build:mapping"; then
+            npm run build:mapping --silent
+          else
+            echo "❌ Le script npm 'build:mapping' n'existe pas dans package.json."
+            echo "   Ajoute-le (ex: \"build:mapping\": \"node scripts/build-mapping.js\") puis relance."
+            exit 2
+          fi
+
+      # Évite l'erreur "nothing to commit"
+      - name: Commit & push mapping (si modifié)
+        run: |
+          FILE="src/vehicles/mapping.json"
+          if [ ! -f "$FILE" ]; then
+            echo "❌ Fichier attendu non trouvé: $FILE"
+            exit 2
+          fi
+
+          if git diff --quiet --exit-code -- "$FILE"; then
+            echo "ℹ️ Aucun changement dans $FILE, rien à committer."
+            exit 0
+          fi
+
+          git config user.name  "github-actions"
+          git config user.email "actions@github.com"
+          git add "$FILE"
+          git commit -m "[skip ci] 🔄 Mise à jour du mapping véhicules"
+          git push
