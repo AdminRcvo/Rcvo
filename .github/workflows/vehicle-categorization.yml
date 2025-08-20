@@ -1,27 +1,61 @@
 name: Vehicle Categorization
+
 on:
+  workflow_dispatch: {}
   push:
+    branches: [ main ]
     paths:
       - 'src/vehicles/**'
       - '.github/workflows/vehicle-categorization.yml'
-    branches: [ main ]
+
 jobs:
   categorize:
     runs-on: ubuntu-latest
+    # Nécessaire pour pouvoir re-committer/pousser mapping.json
+    permissions:
+      contents: write
+
     steps:
-      - uses: actions/checkout@v3
-      - name: Installer Node.js
-        uses: actions/setup-node@v3
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          node-version: '18.x'
-      - name: Générer le mapping
+          fetch-depth: 0          # pour pouvoir diff/commit proprement
+          persist-credentials: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install deps
         run: |
-          npm install
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm i
+          fi
+
+      # ⚠️ Doit exister dans ton package.json :
+      # "scripts": { "build:mapping": "node scripts/categorize-vehicles.js src/vehicles/rules.json > src/vehicles/mapping.json" }
+      - name: Build mapping
+        run: |
           npm run build:mapping
-      - name: Commit & Push mapping
+
+      - name: Detect changes
+        id: diff
         run: |
-          git config user.name 'github-actions'
-          git config user.email 'actions@github.com'
+          if git diff --quiet --exit-code -- src/vehicles/mapping.json; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit & push mapping (skip-ci)
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "actions@github.com"
           git add src/vehicles/mapping.json
-          git commit -m '🔄 Mise à jour du mapping véhicules' || echo "Aucun changement"
+          git commit -m "[skip ci] Mise à jour du mapping véhicules"
           git push
