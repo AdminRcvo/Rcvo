@@ -5,12 +5,19 @@ on:
     branches: [ main ]
   workflow_dispatch: {}
 
+# Expose secrets into env so we can read them in job-level conditions
+env:
+  DOCKER_USER: ${{ secrets.DOCKER_USERNAME || '' }}
+  DOCKER_PASS: ${{ secrets.DOCKER_PASSWORD || '' }}
+  DOCKER_IMAGE: ${{ secrets.DOCKER_IMAGE || 'rcvo/app' }}
+
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
     permissions:
       contents: read
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,7 +38,7 @@ jobs:
           fi
 
       - name: Install deps (safe)
-        if: steps.detect.outputs.has_node == 'true'
+        if: ${{ steps.detect.outputs.has_node == 'true' }}
         run: |
           if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
             npm ci --no-audit --no-fund
@@ -40,7 +47,7 @@ jobs:
           fi
 
       - name: Build (if exists)
-        if: steps.detect.outputs.has_node == 'true'
+        if: ${{ steps.detect.outputs.has_node == 'true' }}
         run: |
           if npm run | grep -q "^  build"; then
             npm run build --silent
@@ -49,7 +56,7 @@ jobs:
           fi
 
       - name: Archive build (if dist exists)
-        if: steps.detect.outputs.has_node == 'true'
+        if: ${{ steps.detect.outputs.has_node == 'true' }}
         run: |
           if [ -d dist ]; then
             tar -czf build-artifact.tgz dist
@@ -60,7 +67,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        if: steps.detect.outputs.has_node == 'true' && (hashFiles('build-artifact.tgz') != '')
+        if: ${{ steps.detect.outputs.has_node == 'true' && hashFiles('build-artifact.tgz') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: build-artifact
@@ -70,7 +77,9 @@ jobs:
     name: Deploy to staging (skips if secrets missing)
     needs: build
     runs-on: ubuntu-latest
-    if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
+    # ✅ Secrets not readable at job level → use env.*
+    if: ${{ env.DOCKER_USER != '' && env.DOCKER_PASS != '' }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -83,17 +92,17 @@ jobs:
 
       - name: Docker login
         run: |
-          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
 
       - name: Build & Push Docker
         env:
-          IMAGE: ${{ secrets.DOCKER_IMAGE || 'rcvo/app' }}
+          IMAGE: ${{ env.DOCKER_IMAGE }}
           TAG:   ${{ github.sha }}
         run: |
           docker build -t "$IMAGE:$TAG" .
           docker push "$IMAGE:$TAG"
 
-      # Déploiement SSH optionnel : skippé si secrets absents
+      # Optional SSH deploy; skipped if secrets not set
       - name: Deploy via SSH (optional)
         if: ${{ secrets.SSH_HOST != '' && secrets.SSH_USER != '' && secrets.SSH_KEY != '' }}
         uses: appleboy/ssh-action@v0.1.10
@@ -103,13 +112,13 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           script: |
             echo "Pull & restart with tag ${{ github.sha }}"
-            # Place ici tes commandes (docker pull/run, systemctl, etc.)
+            # docker pull/run … or systemctl restart …
 
   deploy-production:
     name: Deploy to production (manual)
     needs: [build]
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' }}  # manuel uniquement
+    if: ${{ github.event_name == 'workflow_dispatch' }}  # manual only
     steps:
       - name: Guard
-        run: echo "Production deploy is manual only. Re-run this workflow → pick this job."
+        run: echo "Production deploy is manual only. Re-run this workflow and pick this job."
