@@ -1,54 +1,13 @@
-name: Cost Optimization
-
+name: Cost Optimization (manual only)
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
-
+    inputs:
+      tf_dir:
+        description: 'Chemin du code Terraform (ex: infra/cost-optimizer)'
+        required: false
+        default: 'infra/cost-optimizer'
 jobs:
-  cost-optimization:
+  noop:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
-
-      - name: Debug folder layout
-        run: ls -R .
-
-      - name: Verify cost-optimizer module exists
-        run: |
-          if [ ! -d backend/terraform/modules/cost-optimizer ]; then
-            echo "Module missing!" && exit 1
-          fi
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 'latest'
-
-      - name: Terraform Init & Apply
-        run: |
-          cd backend/terraform
-          terraform init
-          terraform apply -auto-approve
-
-      - name: Cleanup unattached EBS volumes
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id:   ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: eu-west-1
-      - name: Delete unused EBS volumes
-        run: |
-          vols=$(aws ec2 describe-volumes --filters Name=status,Values=available --query "Volumes[].VolumeId" --output text)
-          for v in $vols; do aws ec2 delete-volume --volume-id $v || true; done
-
-      - name: Release unused Elastic IPs
-        run: |
-          eips=$(aws ec2 describe-addresses --filters Name=instance-id,Values=null --query "Addresses[].AllocationId" --output text)
-          for e in $eips; do aws ec2 release-address --allocation-id $e || true; done
-
-      - name: Convert test ASG to Spot
-        run: |
-          # ici votre logique AWS CLI pour les ASG
-          echo "Converting ASG to Spot"
+      - run: echo "Workflow coût désactivé par défaut. Lance-le manuellement si besoin."
