@@ -5,9 +5,10 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'src/vehicles/**'
       - 'qcm/**'
+      - 'src/vehicles/**'
       - 'scripts/**'
+      - '**/package.json'
       - '.github/workflows/vehicle-categorization.yml'
 
 jobs:
@@ -29,44 +30,89 @@ jobs:
         with:
           node-version: 22
 
-      # Installe proprement, que tu aies (ou non) un lockfile
-      - name: Installer dépendances (safe)
+      # Trouver un package.json qui déclare "build:mapping"
+      - name: Localiser package.json avec script build:mapping
+        id: find_pkg
+        shell: bash
         run: |
-          if [ ! -f package.json ]; then
-            echo "❌ package.json introuvable à la racine du repo."
-            exit 2
+          set -euo pipefail
+          FOUND_DIR=""
+          # Liste tous les package.json suivis par git
+          while IFS= read -r file; do
+            # Vérifie via Node si scripts["build:mapping"] existe
+            if node -e "const fs=require('fs');const p='$file';const j=JSON.parse(fs.readFileSync(p,'utf8'));process.exit(j.scripts&&j.scripts['build:mapping']?0:1)"; then
+              FOUND_DIR="$(dirname "$file")"
+              echo "✔ Script build:mapping trouvé dans: $FOUND_DIR"
+              break
+            fi
+          done < <(git ls-files '**/package.json' || true)
+          if [ -n "$FOUND_DIR" ]; then
+            echo "dir=$FOUND_DIR" >> "$GITHUB_OUTPUT"
+            echo "found=true"     >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false"    >> "$GITHUB_OUTPUT"
           fi
+
+      # Chemin du mapping de sortie (unique pour tout le repo)
+      - name: Définir chemin de sortie
+        run: echo "MAP_OUT=src/vehicles/mapping.json" >> $GITHUB_ENV
+
+      # Branche A : on a trouvé un package.json avec build:mapping → run npm
+      - name: Installer dépendances (safe)
+        if: ${{ steps.find_pkg.outputs.found == 'true' }}
+        working-directory: ${{ steps.find_pkg.outputs.dir }}
+        run: |
           if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
             npm ci --no-audit --no-fund
           else
             npm i  --no-audit --no-fund
           fi
 
-      # Lance le script uniquement s'il existe
       - name: Générer le mapping (npm run build:mapping)
-        run: |
-          if npm run | grep -q "^  build:mapping"; then
-            npm run build:mapping --silent
-          else
-            echo "❌ Le script npm 'build:mapping' n'existe pas dans package.json."
-            echo "   Ajoute-le (ex: \"build:mapping\": \"node scripts/build-mapping.js\") puis relance."
-            exit 2
-          fi
+        if: ${{ steps.find_pkg.outputs.found == 'true' }}
+        working-directory: ${{ steps.find_pkg.outputs.dir }}
+        run: npm run build:mapping --silent
 
-      # Évite l'erreur "nothing to commit"
+      # Branche B : aucun package.json adéquat → fallback sans npm
+      - name: Générer le mapping (fallback sans npm)
+        if: ${{ steps.find_pkg.outputs.found != 'true' }}
+        run: |
+          set -euo pipefail
+          CATS="qcm/categories.json"
+          OUT="$MAP_OUT"
+          [ -f "$CATS" ] || { echo "❌ Fichier catégories introuvable: $CATS"; exit 2; }
+          mkdir -p "$(dirname "$OUT")"
+          node - <<'JS' "$CATS" "$OUT"
+          import fs from 'fs';
+          const catsPath = process.argv[2], outPath = process.argv[3];
+          let spec;
+          try { spec = JSON.parse(fs.readFileSync(catsPath,'utf8')); }
+          catch(e){ console.error(`❌ JSON invalide dans ${catsPath}: ${e.message}`); process.exit(2); }
+          if (!Array.isArray(spec.categories)) {
+            console.error("❌ Attendu: { categories:[{name,models[]},...], default? }");
+            process.exit(2);
+          }
+          for (const c of spec.categories) {
+            if (typeof c.name!=='string' || !Array.isArray(c.models)) {
+              console.error("❌ Chaque catégorie: {name:string, models:string[]}");
+              process.exit(2);
+            }
+          }
+          fs.writeFileSync(outPath, JSON.stringify(spec, null, 2));
+          console.log(`✅ mapping écrit -> ${outPath}`);
+          JS
+
+      # Commit uniquement si le mapping a changé
       - name: Commit & push mapping (si modifié)
         run: |
-          FILE="src/vehicles/mapping.json"
+          FILE="$MAP_OUT"
           if [ ! -f "$FILE" ]; then
-            echo "❌ Fichier attendu non trouvé: $FILE"
-            exit 2
+            echo "❌ Fichier attendu non trouvé: $FILE"; exit 2;
           fi
-
           if git diff --quiet --exit-code -- "$FILE"; then
             echo "ℹ️ Aucun changement dans $FILE, rien à committer."
             exit 0
           fi
-
           git config user.name  "github-actions"
           git config user.email "actions@github.com"
           git add "$FILE"
