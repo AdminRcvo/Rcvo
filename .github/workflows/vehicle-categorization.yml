@@ -1,141 +1,24 @@
-name: Vehicle Categorization (strict, uses your AWS categories)
+name: Vehicle Categorization
 
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: "17 3 * * *"   # quotidien 03:17 UTC
+  push:
+    branches: [ main ]
+    paths:
+      - 'qcm/categories.json'
+      - '.github/workflows/vehicle-categorization.yml'
 
 jobs:
   categorize:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
-      contents: read
-    env:
-      AWS_REGION_FALLBACK: eu-west-3
-      OUTPUT_FILE: categorized_vehicles.json
-      DATA_PREFIX: rcvo/categorized
-
+      contents: write   # pour pouvoir commit/push le mapping
     steps:
-      - uses: actions/checkout@v4
-
-      # Résout le rôle OIDC (quel que soit le nom du secret que tu utilises)
-      - name: Resolve OIDC role
-        env:
-          A: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          B: ${{ secrets.AWS_ROLE_PROD }}
-          C: ${{ secrets.ASSISTANT_ROLE_ARN }}
-        run: |
-          ROLE="${A:-${B:-${C:-}}}"
-          [ -z "$ROLE" ] && { echo "❌ Ajoute AWS_ROLE_TO_ASSUME/PROD/ASSISTANT_ROLE_ARN"; exit 1; }
-          echo "ROLE_TO_ASSUME=$ROLE" >> $GITHUB_ENV
-
-      - name: Resolve region
-        env:
-          R: ${{ secrets.AWS_REGION }}
-        run: echo "REGION=${R:-$AWS_REGION_FALLBACK}" >> $GITHUB_ENV
-
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
-          aws-region: ${{ env.REGION }}
+          fetch-depth: 0
+          persist-credentials: true
 
-      - name: Setup Node 22 (no deps)
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      # Récupère TON fichier de catégories depuis S3 (ex: s3://rcvo-data/qcm/categories.json)
-      - name: Download categories spec from S3
-        env:
-          CATEGORIES_S3_URI: ${{ secrets.RCVO_CATEGORIES_S3_URI }}
-        run: |
-          [ -z "$CATEGORIES_S3_URI" ] && { echo "❌ Secret RCVO_CATEGORIES_S3_URI manquant (ex: s3://rcvo-data/qcm/categories.json)"; exit 2; }
-          mkdir -p qcm
-          aws s3 cp "$CATEGORIES_S3_URI" qcm/categories.json
-          test -s qcm/categories.json || { echo "❌ qcm/categories.json vide"; exit 2; }
-
-      # Catégorisation STRICTE — lit UNIQUEMENT tes catégories, pas d’invention
-      - name: Run categorization (strict)
-        env:
-          RCVO_API_BASE: ${{ secrets.RCVO_API_BASE }}      # ex: https://<lb-api>/api (laisser vide => cherche vehicles.json)
-          RCVO_API_TOKEN: ${{ secrets.RCVO_API_TOKEN }}    # si besoin
-        run: |
-          node - <<'JS' > "${OUTPUT_FILE}"
-          // STRICT: applique uniquement qcm/categories.json, aucune règle ajoutée
-          import fs from 'fs';
-          import path from 'path';
-          const toS = v => (v ?? '').toString().trim();
-          function matchesAny(str, patterns=[]) {
-            const s = toS(str);
-            return patterns.some(rx => new RegExp(rx, 'i').test(s));
-          }
-          const SPEC_PATH = 'qcm/categories.json';
-          if (!fs.existsSync(SPEC_PATH)) { console.error("❌ categories manquantes"); process.exit(2); }
-          const spec = JSON.parse(fs.readFileSync(SPEC_PATH,'utf8'));
-          if (!Array.isArray(spec.categories)) { console.error("❌ format invalide: 'categories' attendu"); process.exit(2); }
-
-          const API_BASE  = process.env.RCVO_API_BASE || '';
-          const API_TOKEN = process.env.RCVO_API_TOKEN || '';
-
-          async function readVehicles(){
-            if (API_BASE) {
-              const url = API_BASE.replace(/\/+$/,'') + '/vehicles';
-              const headers = { Accept: 'application/json' };
-              if (API_TOKEN) headers.Authorization = `Bearer ${API_TOKEN}`;
-              const r = await fetch(url, { headers });
-              if (!r.ok) throw new Error(`GET ${url} -> ${r.status} ${await r.text()}`);
-              const data = await r.json();
-              return Array.isArray(data) ? data : (data.items || data.results || data);
-            }
-            const local = path.join(process.cwd(), 'vehicles.json');
-            if (fs.existsSync(local)) return JSON.parse(fs.readFileSync(local,'utf8'));
-            return []; // pas d'API, pas de fichier -> liste vide (toujours "vert")
-          }
-
-          function pick(model){
-            for (const cat of spec.categories) {
-              const pats = Array.isArray(cat.models) ? cat.models : [];
-              if (matchesAny(model, pats)) return cat.name;
-            }
-            return spec.default || 'Autre';
-          }
-
-          async function patch(v, category){
-            if (!API_BASE || !v?.id) return;
-            const url = API_BASE.replace(/\/+$/,'') + '/vehicles/' + v.id;
-            const headers = { 'Content-Type':'application/json', Accept:'application/json' };
-            if (API_TOKEN) headers.Authorization = `Bearer ${API_TOKEN}`;
-            const body = JSON.stringify({ category_qcm: category });
-            const r = await fetch(url, { method:'PATCH', headers, body });
-            if (!r.ok) console.error('PATCH', url, '->', r.status, await r.text().catch(()=> ''));
-          }
-
-          const vehicles = await readVehicles();
-          const out = [];
-          for (const v of vehicles) {
-            const category = pick(toS(v.model));
-            out.push({ id: v.id ?? null, model: v.model ?? null, category });
-            try { await patch(v, category); } catch {}
-          }
-          process.stdout.write(JSON.stringify({ generatedAt: new Date().toISOString(), count: out.length, items: out }, null, 2));
-          JS
-
-      - name: Upload JSON to S3
-        env:
-          S3_EXPLICIT: ${{ secrets.S3_DATA_BUCKET }}        # ou laisse vide pour fallback
-          S3_BUCKET_FALLBACK: ${{ secrets.S3_BUCKET }}      # ex: rcvo-eb-artifacts
-        run: |
-          BUCKET="${S3_EXPLICIT:-$S3_BUCKET_FALLBACK}"
-          [ -z "$BUCKET" ] && { echo "❌ Fournis S3_DATA_BUCKET ou S3_BUCKET"; exit 1; }
-          DATE=$(date -u +%Y%m%dT%H%M%SZ)
-          KEY="${{ env.DATA_PREFIX }}/${DATE}.json"
-          aws s3 cp "${{ env.OUTPUT_FILE }}" "s3://${BUCKET}/${KEY}"
-          echo "✅ s3://${BUCKET}/${KEY}"
-
-      - name: Keep artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rcvo-categorized
-          path: ${{ env.OUTPUT_FILE }}
+      # AUCUN npm, AUCUN docker, AUCUN terraform.
+      # Sc
