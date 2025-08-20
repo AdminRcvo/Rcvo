@@ -1,7 +1,12 @@
 name: Vehicle Categorization
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      categories_path:
+        description: "Chemin du fichier catégories.json (optionnel)"
+        required: false
+        default: ""
   push:
     branches: [ main ]
     paths:
@@ -31,7 +36,7 @@ jobs:
         with:
           node-version: 22
 
-      # 1) Trouver un package.json qui déclare "build:mapping"
+      # 1) Localiser package.json avec script build:mapping (si jamais il existe)
       - name: Localiser package.json avec script build:mapping
         id: find_pkg
         shell: bash
@@ -39,9 +44,8 @@ jobs:
           set -euo pipefail
           FOUND_DIR=""
           while IFS= read -r file; do
-            if node -e "const fs=require('fs');const p='$file';const j=JSON.parse(fs.readFileSync(p,'utf8'));process.exit(j.scripts&&j.scripts['build:mapping']?0:1)"; then
+            if node -e "const fs=require('fs');const j=JSON.parse(fs.readFileSync('$file','utf8'));process.exit(j.scripts&&j.scripts['build:mapping']?0:1)"; then
               FOUND_DIR="$(dirname "$file")"
-              echo "✔ Script build:mapping trouvé dans: $FOUND_DIR"
               break
             fi
           done < <(git ls-files '**/package.json' || true)
@@ -52,16 +56,22 @@ jobs:
             echo "found=false"    >> "$GITHUB_OUTPUT"
           fi
 
-      # 2) Localiser le fichier catégories.json (où qu'il soit dans le repo)
+      # 2) Localiser le fichier catégories.json (ou prendre l'input manuel)
       - name: Localiser fichier catégories
         id: find_cats
         shell: bash
         run: |
           set -euo pipefail
-          # priorités de chemins usuels
+          # priorité à l'input manuel
+          MANUAL="${{ github.event.inputs.categories_path }}"
+          if [ -n "$MANUAL" ] && [ -f "$MANUAL" ]; then
+            echo "path=$MANUAL" >> "$GITHUB_OUTPUT"
+            echo "found=true"   >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           CANDIDATES=(
             "qcm/categories.json"
-            "src/qcm/categories.json"
             "data/categories.json"
             "config/categories.json"
             "src/**/categories.json"
@@ -69,28 +79,24 @@ jobs:
           )
           FOUND=""
           for pat in "${CANDIDATES[@]}"; do
-            # liste les fichiers suivis par git correspondant au motif
             while IFS= read -r f; do
-              # vérifie qu'il s'agit bien d'un JSON avec une clé "categories" (tableau)
-              if node -e "const fs=require('fs');const p=process.argv[1];try{const j=JSON.parse(fs.readFileSync(p,'utf8'));if(Array.isArray(j.categories))process.exit(0);}catch{}process.exit(1)" "$f"; then
+              if node -e "const fs=require('fs');try{const j=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.exit(Array.isArray(j.categories)?0:1)}catch{process.exit(1)}" "$f"; then
                 FOUND="$f"; break 2
               fi
             done < <(git ls-files "$pat" || true)
           done
 
           if [ -n "$FOUND" ]; then
-            echo "✔ Fichier catégories trouvé: $FOUND"
-            echo "path=$FOUND" >> "$GITHUB_OUTPUT"
+            echo "path=$FOUND"  >> "$GITHUB_OUTPUT"
+            echo "found=true"   >> "$GITHUB_OUTPUT"
           else
-            echo "❌ Aucun fichier catégories.json valide trouvé."
-            echo "Liste rapide des *.json à la racine :" 
-            ls -1 *.json 2>/dev/null || true
-            exit 2
+            echo "found=false"  >> "$GITHUB_OUTPUT"
+            echo "note=Place un fichier JSON du type: { \"categories\":[{ \"name\":\"Citadine\",\"models\":[] }, ... ] }" >> "$GITHUB_OUTPUT"
           fi
 
-      # 3A) Si build:mapping existe → exécuter npm dans ce dossier
+      # 3A) Si build:mapping existe → exécuter npm
       - name: Installer dépendances (safe)
-        if: ${{ steps.find_pkg.outputs.found == 'true' }}
+        if: ${{ steps.find_pkg.outputs.found == 'true' && steps.find_cats.outputs.found == 'true' }}
         working-directory: ${{ steps.find_pkg.outputs.dir }}
         run: |
           if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
@@ -100,17 +106,15 @@ jobs:
           fi
 
       - name: Générer le mapping (npm run build:mapping)
-        if: ${{ steps.find_pkg.outputs.found == 'true' }}
+        if: ${{ steps.find_pkg.outputs.found == 'true' && steps.find_cats.outputs.found == 'true' }}
         working-directory: ${{ steps.find_pkg.outputs.dir }}
         env:
           RCVO_CATEGORIES_FILE: ${{ steps.find_cats.outputs.path }}
-        run: |
-          # si ton script lit un chemin via variable env, il peut utiliser RCVO_CATEGORIES_FILE
-          npm run build:mapping --silent
+        run: npm run build:mapping --silent
 
-      # 3B) Sinon → fallback sans npm : copier/valider vers src/vehicles/mapping.json
-      - name: Générer le mapping (fallback sans npm)
-        if: ${{ steps.find_pkg.outputs.found != 'true' }}
+      # 3B) Fallback sans npm
+      - name: Générer le mapping (fallback)
+        if: ${{ steps.find_pkg.outputs.found != 'true' && steps.find_cats.outputs.found == 'true' }}
         env:
           CATS_FILE: ${{ steps.find_cats.outputs.path }}
         run: |
@@ -120,32 +124,37 @@ jobs:
           node - <<'JS' "$CATS_FILE" "$OUT"
           import fs from 'fs';
           const catsPath = process.argv[2], outPath = process.argv[3];
-          let spec;
-          try { spec = JSON.parse(fs.readFileSync(catsPath,'utf8')); }
-          catch(e){ console.error(`❌ JSON invalide dans ${catsPath}: ${e.message}`); process.exit(2); }
-          if (!Array.isArray(spec.categories)) { console.error("❌ Attendu: { categories:[{name,models[]},...], default? }"); process.exit(2); }
-          for (const c of spec.categories) {
-            if (typeof c.name!=='string' || !Array.isArray(c.models)) {
-              console.error("❌ Chaque catégorie: {name:string, models:string[]}"); process.exit(2);
-            }
+          const data = JSON.parse(fs.readFileSync(catsPath,'utf8'));
+          if (!Array.isArray(data.categories)) { throw new Error("format attendu {categories:[...]}" ); }
+          for (const c of data.categories) {
+            if (typeof c.name!=='string' || !Array.isArray(c.models)) throw new Error("chaque catégorie = {name:string, models:string[]}");
           }
-          fs.writeFileSync(outPath, JSON.stringify(spec, null, 2));
-          console.log(`✅ mapping écrit -> ${outPath}`);
+          fs.writeFileSync(outPath, JSON.stringify(data, null, 2));
+          console.log(`✅ mapping -> ${outPath}`);
           JS
 
-      # 4) Commit uniquement si ça a changé
+      # 3C) Rien trouvé → sortie propre, succès
+      - name: Rien à faire (catégories non trouvées)
+        if: ${{ steps.find_cats.outputs.found != 'true' }}
+        run: |
+          echo "ℹ️ Aucun fichier catégories.json valide trouvé."
+          echo "   ➜ Ajoute par ex. 'qcm/categories.json' avec: { \"categories\": [ { \"name\": \"Citadine\", \"models\": [] }, ... ] }"
+          echo "   ➜ Ou relance manuellement en passant un chemin via 'categories_path'."
+
+      # 4) Commit uniquement si modifié
       - name: Commit & push mapping (si modifié)
         run: |
           FILE="src/vehicles/mapping.json"
           if [ ! -f "$FILE" ]; then
-            echo "❌ Fichier attendu non trouvé: $FILE"; exit 2;
+            echo "Pas de mapping généré (aucun fichier catégories) — OK."
+            exit 0
           fi
           if git diff --quiet --exit-code -- "$FILE"; then
-            echo "ℹ️ Aucun changement dans $FILE, rien à committer."
+            echo "Aucun changement dans $FILE."
             exit 0
           fi
           git config user.name  "github-actions"
           git config user.email "actions@github.com"
           git add "$FILE"
-          git commit -m "[skip ci] 🔄 Mise à jour du mapping véhicules"
+          git commit -m "[skip ci] 🔄 MAJ mapping véhicules"
           git push
