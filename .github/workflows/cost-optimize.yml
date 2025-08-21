@@ -7,6 +7,10 @@ on:
         description: 'Chemin du module Terraform à exécuter (ex: backend/terraform/modules/cost-optimizer)'
         required: false
         default: 'backend/terraform/modules/cost-optimizer'
+      private_subnet_id:
+        description: 'ID du subnet privé pour la NAT instance (ex: subnet-0abc1234)'
+        required: false
+        default: ''
       apply:
         description: 'Mettre à true pour exécuter terraform apply (danger : modifie infra)'
         required: false
@@ -44,6 +48,14 @@ jobs:
             exit 1
           fi
 
+      - name: Require private_subnet_id (if module needs it)
+        run: |
+          # si le module a besoin d'un private_subnet_id, obliger l'utilisateur à le fournir
+          if [ -z "${{ github.event.inputs.private_subnet_id }}" ]; then
+            echo "::error ::Le paramètre 'private_subnet_id' est vide. Renseignez-le pour exécuter le plan."
+            exit 1
+          fi
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
@@ -53,7 +65,7 @@ jobs:
         working-directory: ${{ github.workspace }}/${{ github.event.inputs.tf_dir }}
         run: |
           terraform init -input=false
-          terraform plan -input=false -out=tfplan
+          terraform plan -input=false -var="private_subnet_id=${{ github.event.inputs.private_subnet_id }}" -out=tfplan
 
       - name: Terraform Apply (only if requested)
         if: ${{ github.event.inputs.apply == 'true' }}
@@ -63,5 +75,4 @@ jobs:
 
       - name: Notify summary
         run: |
-          echo "Cost optimization workflow completed. apply=${{ github.event.inputs.apply }}"
-
+          echo "Cost optimization workflow completed. apply=${{ github.event.inputs.apply }} private_subnet_id=${{ github.event.inputs.private_subnet_id }}"
