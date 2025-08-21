@@ -1,13 +1,67 @@
 name: Cost Optimization (manual only)
+
 on:
   workflow_dispatch:
     inputs:
       tf_dir:
-        description: 'Chemin du code Terraform (ex: infra/cost-optimizer)'
+        description: 'Chemin du module Terraform à exécuter (ex: backend/terraform/modules/cost-optimizer)'
         required: false
-        default: 'infra/cost-optimizer'
+        default: 'backend/terraform/modules/cost-optimizer'
+      apply:
+        description: 'Mettre à true pour exécuter terraform apply (danger : modifie infra)'
+        required: false
+        default: 'false'
+
 jobs:
-  noop:
+  cost-optimize:
+    name: Cost Optimization
     runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
-      - run: echo "Workflow coût désactivé par défaut. Lance-le manuellement si besoin."
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Debug - show working directory & list tf_dir
+        run: |
+          echo "Working directory: $(pwd)"
+          echo "Requested tf_dir: ${{ github.event.inputs.tf_dir }}"
+          ls -la "${{ github.workspace }}/${{ github.event.inputs.tf_dir }}" || true
+
+      - name: Verify tf module exists
+        run: |
+          if [ ! -d "${{ github.workspace }}/${{ github.event.inputs.tf_dir }}" ]; then
+            echo "::error ::Module Terraform introuvable : ${{ github.event.inputs.tf_dir }}"
+            exit 1
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.6.0'
+
+      - name: Terraform Init & Plan
+        working-directory: ${{ github.workspace }}/${{ github.event.inputs.tf_dir }}
+        run: |
+          terraform init -input=false
+          terraform plan -input=false -out=tfplan
+
+      - name: Terraform Apply (only if requested)
+        if: ${{ github.event.inputs.apply == 'true' }}
+        working-directory: ${{ github.workspace }}/${{ github.event.inputs.tf_dir }}
+        run: |
+          terraform apply -input=false -auto-approve tfplan
+
+      - name: Notify summary
+        run: |
+          echo "Cost optimization workflow completed. apply=${{ github.event.inputs.apply }}"
+
