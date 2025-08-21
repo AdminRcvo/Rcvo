@@ -8,7 +8,7 @@ on:
         required: false
         default: 'backend/terraform/modules/cost-optimizer'
       private_subnet_id:
-        description: 'ID du subnet privé pour la NAT instance (ex: subnet-0abc1234)'
+        description: 'ID du subnet pour la NAT instance (ex: subnet-0abc1234)'
         required: false
         default: ''
       apply:
@@ -50,10 +50,15 @@ jobs:
 
       - name: Require private_subnet_id (if module needs it)
         run: |
-          # si le module a besoin d'un private_subnet_id, obliger l'utilisateur à le fournir
-          if [ -z "${{ github.event.inputs.private_subnet_id }}" ]; then
-            echo "::error ::Le paramètre 'private_subnet_id' est vide. Renseignez-le pour exécuter le plan."
-            exit 1
+          # Si le module a besoin d'un subnet pour la NAT instance, obliger l'utilisateur à le fournir.
+          if grep -q "var.private_subnet_id" "${{ github.workspace }}/${{ github.event.inputs.tf_dir }}/main.tf"; then
+            if [ -z "${{ github.event.inputs.private_subnet_id }}" ]; then
+              echo "::error ::Le paramètre 'private_subnet_id' est vide. Renseignez-le pour exécuter le plan."
+              exit 1
+            fi
+            echo "private_subnet_id fourni: ${{ github.event.inputs.private_subnet_id }}"
+          else
+            echo "Module ne semble pas utiliser private_subnet_id; continuation sans variable."
           fi
 
       - name: Setup Terraform
@@ -65,7 +70,12 @@ jobs:
         working-directory: ${{ github.workspace }}/${{ github.event.inputs.tf_dir }}
         run: |
           terraform init -input=false
-          terraform plan -input=false -var="private_subnet_id=${{ github.event.inputs.private_subnet_id }}" -out=tfplan
+          # Si private_subnet_id est vide, on plan sans -var (mais Require step empêche si nécessaire)
+          if [ -n "${{ github.event.inputs.private_subnet_id }}" ]; then
+            terraform plan -input=false -var="private_subnet_id=${{ github.event.inputs.private_subnet_id }}" -out=tfplan
+          else
+            terraform plan -input=false -out=tfplan
+          fi
 
       - name: Terraform Apply (only if requested)
         if: ${{ github.event.inputs.apply == 'true' }}
@@ -75,4 +85,4 @@ jobs:
 
       - name: Notify summary
         run: |
-          echo "Cost optimization workflow completed. apply=${{ github.event.inputs.apply }} private_subnet_id=${{ github.event.inputs.private_subnet_id }}"
+          echo "Cost optimization workflow completed. apply=${{ github.event.inputs.apply }} private_subnet_id='${{ github.event.inputs.private_subnet_id }}'"
