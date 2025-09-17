@@ -19,6 +19,7 @@ jobs:
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      # Expose the secret into env so we can safely test env.S3_BUCKET in `if`
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
 
     steps:
@@ -68,7 +69,8 @@ jobs:
           fi
 
       - name: Quick S3 storage-class check (non-destructive)
-        if: ${{ secrets.S3_BUCKET != '' }}
+        # NOTE: use env.S3_BUCKET in the if (do NOT reference secrets directly here)
+        if: ${{ env.S3_BUCKET != '' }}
         run: |
           set -euo pipefail
           KEY_BASE="cost-optimize-check-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}"
@@ -76,19 +78,25 @@ jobs:
           ARCHIVE_KEY="archive/${KEY_BASE}.txt"
           echo "ping" > "/tmp/${KEY_BASE}.txt"
 
-          aws s3 cp "/tmp/${KEY_BASE}.txt" "s3://${{ secrets.S3_BUCKET }}/${TEMP_KEY}" --region "${{ secrets.AWS_REGION }}" --only-show-errors
-          aws s3 cp "s3://${{ secrets.S3_BUCKET }}/${TEMP_KEY}" "s3://${{ secrets.S3_BUCKET }}/${ARCHIVE_KEY}" --region "${{ secrets.AWS_REGION }}" --storage-class STANDARD --only-show-errors
+          echo "Uploading test object to s3://${S3_BUCKET}/${TEMP_KEY}"
+          aws s3 cp "/tmp/${KEY_BASE}.txt" "s3://${S3_BUCKET}/${TEMP_KEY}" --region "${AWS_REGION}" --only-show-errors
 
-          SC=$(aws s3api head-object --bucket "${{ secrets.S3_BUCKET }}" --key "${ARCHIVE_KEY}" --query 'StorageClass' --output text --region "${{ secrets.AWS_REGION }}" || echo "")
+          # copy to archive/ explicitly as STANDARD
+          aws s3 cp "s3://${S3_BUCKET}/${TEMP_KEY}" "s3://${S3_BUCKET}/${ARCHIVE_KEY}" --region "${AWS_REGION}" --storage-class STANDARD --only-show-errors
+
+          # head-object may return no StorageClass field for STANDARD => handle that
+          SC=$(aws s3api head-object --bucket "${S3_BUCKET}" --key "${ARCHIVE_KEY}" --query 'StorageClass' --output text --region "${AWS_REGION}" || echo "")
           echo "Raw StorageClass read: '${SC}'"
+
           if [ "${SC}" = "STANDARD" ] || [ -z "${SC}" ] || [ "${SC}" = "None" ] || [ "${SC}" = "null" ]; then
             echo "StorageClass OK (interpreted as STANDARD)."
           else
             echo "WARNING: StorageClass is not STANDARD: ${SC}"
           fi
 
-          aws s3 rm "s3://${{ secrets.S3_BUCKET }}/${TEMP_KEY}" --region "${{ secrets.AWS_REGION }}" >/dev/null 2>&1 || true
-          aws s3 rm "s3://${{ secrets.S3_BUCKET }}/${ARCHIVE_KEY}" --region "${{ secrets.AWS_REGION }}" >/dev/null 2>&1 || true
+          # cleanup (best-effort)
+          aws s3 rm "s3://${S3_BUCKET}/${TEMP_KEY}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
+          aws s3 rm "s3://${S3_BUCKET}/${ARCHIVE_KEY}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
           rm -f "/tmp/${KEY_BASE}.txt" || true
 
       - name: Report summary
