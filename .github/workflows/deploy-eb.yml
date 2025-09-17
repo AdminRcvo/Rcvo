@@ -8,10 +8,9 @@ permissions:
   contents: read
 
 env:
-  # Values must exist as repository Secrets; if some are omitted, the workflow will error early with a clear message.
   AWS_REGION: ${{ secrets.AWS_REGION }}
   S3_BUCKET: ${{ secrets.S3_BUCKET }}
-  S3_PREFIX: ${{ secrets.S3_PREFIX }}   # optional: if empty, step will default to 'rcvo-backend'
+  S3_PREFIX: ${{ secrets.S3_PREFIX }}
   ARCHIVE_PREFIX: archive
   EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
   EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}
@@ -33,8 +32,11 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN || '' }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Detect UI (./ui/package.json) presence
         id: detect_ui
@@ -57,7 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci
-          npm run build || true
+          npm run build
 
       - name: Create stable snapshot tarball (safe, in temp dir)
         id: make_tar
@@ -81,8 +83,6 @@ jobs:
           TMPDIR=$(mktemp -d)
           echo "Creating stable snapshot: ${TAR_NAME} in ${TMPDIR}"
 
-          # Archive workspace contents excluding .git and .github to avoid changing files while reading
-          # -C to change into GITHUB_WORKSPACE and archive content; tar written to TMPDIR
           tar --exclude='.git' --exclude='.github' -czf "${TMPDIR}/${TAR_NAME}" -C "${GITHUB_WORKSPACE}" .
 
           if [ ! -f "${TMPDIR}/${TAR_NAME}" ]; then
@@ -100,20 +100,15 @@ jobs:
           set -euo pipefail
           ARCHIVE_PATH="${{ steps.make_tar.outputs.archive_path }}"
 
-          # compute prefix with fallback in shell (no '||' inside expressions)
-          PREFIX="${{ env.S3_PREFIX }}"
-          if [ -z "$PREFIX" ]; then
-            PREFIX="rcvo-backend"
-          fi
-
-          BUCKET="${{ env.S3_BUCKET }}"
+          PREFIX="${S3_PREFIX:-rcvo-backend}" # fallback if S3_PREFIX not set
+          BUCKET="${S3_BUCKET}"
           ARCHIVE_NAME="${{ steps.make_tar.outputs.archive_name }}"
-          ARCHIVE_KEY="${{ env.ARCHIVE_PREFIX }}/${ARCHIVE_NAME}"
+          ARCHIVE_KEY="${ARCHIVE_PREFIX}/${ARCHIVE_NAME}"
 
           echo "Uploading ${ARCHIVE_PATH} to s3://${BUCKET}/${ARCHIVE_KEY} (STANDARD)"
-          aws s3 cp "${ARCHIVE_PATH}" "s3://${BUCKET}/${ARCHIVE_KEY}" --storage-class STANDARD --region "${{ env.AWS_REGION }}"
+          aws s3 cp "${ARCHIVE_PATH}" "s3://${BUCKET}/${ARCHIVE_KEY}" --storage-class STANDARD --region "${AWS_REGION}"
 
-          OBJ_JSON=$(aws s3api head-object --bucket "$BUCKET" --key "${ARCHIVE_KEY}" --region "${{ env.AWS_REGION }}" --output json)
+          OBJ_JSON=$(aws s3api head-object --bucket "$BUCKET" --key "${ARCHIVE_KEY}" --region "${AWS_REGION}" --output json)
           echo "s3_head=${OBJ_JSON}" >> $GITHUB_OUTPUT
           echo "s3_key=${ARCHIVE_KEY}" >> $GITHUB_OUTPUT
 
@@ -121,9 +116,9 @@ jobs:
         id: create_app_version
         run: |
           set -euo pipefail
-          BUCKET="${{ env.S3_BUCKET }}"
+          BUCKET="${S3_BUCKET}"
           S3_KEY="${{ steps.upload_s3.outputs.s3_key }}"
-          APP_NAME="${{ env.EB_APP_NAME }}"
+          APP_NAME="${EB_APP_NAME}"
           VERSION_LABEL="gh-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           if [ -z "$APP_NAME" ]; then
@@ -136,7 +131,7 @@ jobs:
             --application-name "$APP_NAME" \
             --version-label "$VERSION_LABEL" \
             --source-bundle S3Bucket="$BUCKET",S3Key="$S3_KEY" \
-            --region "${{ env.AWS_REGION }}" \
+            --region "${AWS_REGION}" \
             --auto-create-application || true
 
           echo "version_label=${VERSION_LABEL}" >> $GITHUB_OUTPUT
@@ -145,9 +140,9 @@ jobs:
         id: wait_version
         run: |
           set -euo pipefail
-          APP_NAME="${{ env.EB_APP_NAME }}"
+          APP_NAME="${EB_APP_NAME}"
           VERSION_LABEL="${{ steps.create_app_version.outputs.version_label }}"
-          REGION="${{ env.AWS_REGION }}"
+          REGION="${AWS_REGION}"
 
           for i in $(seq 1 30); do
             OUT=$(aws elasticbeanstalk describe-application-versions \
@@ -169,10 +164,10 @@ jobs:
         id: deploy_env
         run: |
           set -euo pipefail
-          ENV_NAME="${{ env.EB_ENV_NAME }}"
-          APP_NAME="${{ env.EB_APP_NAME }}"
+          ENV_NAME="${EB_ENV_NAME}"
+          APP_NAME="${EB_APP_NAME}"
           VERSION_LABEL="${{ steps.create_app_version.outputs.version_label }}"
-          REGION="${{ env.AWS_REGION }}"
+          REGION="${AWS_REGION}"
 
           if [ -z "$ENV_NAME" ]; then
             echo "ERROR: EB_ENV_NAME must be set as a repo secret."
@@ -188,8 +183,8 @@ jobs:
       - name: Describe environment (short summary)
         run: |
           set -euo pipefail
-          ENV_NAME="${{ env.EB_ENV_NAME }}"
-          REGION="${{ env.AWS_REGION }}"
+          ENV_NAME="${EB_ENV_NAME}"
+          REGION="${AWS_REGION}"
           aws elasticbeanstalk describe-environments \
             --environment-names "$ENV_NAME" \
             --region "$REGION" \
