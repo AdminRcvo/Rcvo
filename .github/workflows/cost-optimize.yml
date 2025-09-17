@@ -14,11 +14,13 @@ jobs:
   cost-analyze:
     name: Cost analysis (safe)
     runs-on: ubuntu-latest
+
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -50,8 +52,6 @@ jobs:
           PY
 
       - name: Gather AWS account info (read-only)
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
           echo "AWS CLI version: $(aws --version 2>&1 || true)"
@@ -62,41 +62,34 @@ jobs:
           set -euo pipefail
           if [ -x "./scripts/cost-optimize.sh" ]; then
             echo "Found ./scripts/cost-optimize.sh — executing (safe mode)"
-            ./scripts/cost-optimize.sh || echo "script failed (allowed)"
+            ./scripts/cost-optimize.sh || echo "script returned non-zero (allowed)"
           else
             echo "No ./scripts/cost-optimize.sh found — skipping"
           fi
 
       - name: Quick S3 storage-class check (non-destructive)
         if: ${{ secrets.S3_BUCKET != '' }}
-        env:
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
           KEY_BASE="cost-optimize-check-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}"
           TEMP_KEY="tmp/${KEY_BASE}.txt"
           ARCHIVE_KEY="archive/${KEY_BASE}.txt"
-          echo "ping" > /tmp/${KEY_BASE}.txt
+          echo "ping" > "/tmp/${KEY_BASE}.txt"
 
-          echo "Uploading test object to s3://${S3_BUCKET}/${TEMP_KEY}"
-          aws s3 cp /tmp/${KEY_BASE}.txt s3://${S3_BUCKET}/${TEMP_KEY} --region "${AWS_REGION}" --only-show-errors
+          aws s3 cp "/tmp/${KEY_BASE}.txt" "s3://${{ secrets.S3_BUCKET }}/${TEMP_KEY}" --region "${{ secrets.AWS_REGION }}" --only-show-errors
+          aws s3 cp "s3://${{ secrets.S3_BUCKET }}/${TEMP_KEY}" "s3://${{ secrets.S3_BUCKET }}/${ARCHIVE_KEY}" --region "${{ secrets.AWS_REGION }}" --storage-class STANDARD --only-show-errors
 
-          # copy to archive/ explicitly with storage-class STANDARD
-          aws s3 cp s3://${S3_BUCKET}/${TEMP_KEY} s3://${S3_BUCKET}/${ARCHIVE_KEY} --region "${AWS_REGION}" --storage-class STANDARD --only-show-errors
-
-          SC=$(aws s3api head-object --bucket "${S3_BUCKET}" --key "${ARCHIVE_KEY}" --query 'StorageClass' --output text --region "${AWS_REGION}" || echo "")
+          SC=$(aws s3api head-object --bucket "${{ secrets.S3_BUCKET }}" --key "${ARCHIVE_KEY}" --query 'StorageClass' --output text --region "${{ secrets.AWS_REGION }}" || echo "")
           echo "Raw StorageClass read: '${SC}'"
-
           if [ "${SC}" = "STANDARD" ] || [ -z "${SC}" ] || [ "${SC}" = "None" ] || [ "${SC}" = "null" ]; then
             echo "StorageClass OK (interpreted as STANDARD)."
           else
             echo "WARNING: StorageClass is not STANDARD: ${SC}"
           fi
 
-          aws s3 rm s3://${S3_BUCKET}/${TEMP_KEY} --region "${AWS_REGION}" >/dev/null 2>&1 || true
-          aws s3 rm s3://${S3_BUCKET}/${ARCHIVE_KEY} --region "${AWS_REGION}" >/dev/null 2>&1 || true
-          rm -f /tmp/${KEY_BASE}.txt || true
+          aws s3 rm "s3://${{ secrets.S3_BUCKET }}/${TEMP_KEY}" --region "${{ secrets.AWS_REGION }}" >/dev/null 2>&1 || true
+          aws s3 rm "s3://${{ secrets.S3_BUCKET }}/${ARCHIVE_KEY}" --region "${{ secrets.AWS_REGION }}" >/dev/null 2>&1 || true
+          rm -f "/tmp/${KEY_BASE}.txt" || true
 
       - name: Report summary
         run: |
