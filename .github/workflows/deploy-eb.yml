@@ -16,6 +16,13 @@ jobs:
       run:
         shell: bash
 
+    env:
+      # valeurs fixes (adaptées comme demandé)
+      BUCKET: elasticbeanstalk-eu-west-3-409818814260
+      APP: Rcvo-backend
+      ENV: rcvo-backend-prod
+      REGION: eu-west-3
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,7 +32,8 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          # si tu utilises des jetons temporaires, ajoute AWS_SESSION_TOKEN dans les secrets
+          aws-region: ${{ env.REGION }}
 
       - name: Setup Node.js (for frontend build if present)
         uses: actions/setup-node@v4
@@ -46,42 +54,108 @@ jobs:
           fi
 
       - name: Create dereferenced tarball (stable snapshot)
+        id: make_tar
         run: |
           set -euo pipefail
 
           TS=$(date +%Y%m%d-%H%M%S)
           OUT="rcvo-deploy-${TS}.tar.gz"
-          echo "Creating stable snapshot for $OUT"
+          echo "Creating stable snapshot: $OUT"
 
-          # Create a temporary snapshot dir and dereference symlinks into it
+          # tmpdir pour éviter les modifications pendant tar
           TMP_DIR=$(mktemp -d)
-          echo "tmp: $TMP_DIR"
+          echo "TMP_DIR=$TMP_DIR"
 
-          # rsync -aL will copy files and dereference symlinks (-L).
-          # Exclude heavy or unnecessary dirs/files (adjust if needed).
+          # rsync -aL déréférence les symlinks (ui -> cible réelle)
           rsync -aL --delete \
             --exclude='.git' \
             --exclude='node_modules' \
+            --exclude='.github' \
             --exclude='*.log' \
             --exclude='*.zip' \
-            --exclude='.github' \
             --exclude='.venv' \
             ./ "$TMP_DIR/"
 
-          # create tarball inside TMP_DIR (prevents "file changed as we read it")
+          # créer le tarball **dans** TMP_DIR pour éviter "file changed as we read it"
           OUTPATH="$TMP_DIR/$OUT"
           tar -C "$TMP_DIR" --warning=no-file-changed -czf "$OUTPATH" .
 
-          # sanity check then move to workspace
           if [ ! -f "$OUTPATH" ]; then
             echo "ERROR: tarball not created at $OUTPATH" >&2
             exit 1
           fi
 
+          # déplacer le tarball vers le workspace (évite mv sur même fichier)
           mv "$OUTPATH" "$GITHUB_WORKSPACE/$OUT"
 
-          # export for following steps
           echo "TARBALL=$OUT" >> "$GITHUB_ENV"
+          echo "Created tarball: $OUT"
 
           # cleanup
           rm -rf "$TMP_DIR"
+
+      - name: Upload tarball to S3 and verify STANDARD storage class
+        id: upload_s3
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TARBALL:-}" ]; then
+            echo "ERROR: TARBALL not set" >&2
+            exit 1
+          fi
+
+          LOCAL_PATH="$GITHUB_WORKSPACE/$TARBALL"
+          if [ ! -f "$LOCAL_PATH" ]; then
+            echo "ERROR: expected tarball at $LOCAL_PATH not found" >&2
+            exit 1
+          fi
+
+          S3_KEY="rcvo-backend/$TARBALL"
+          echo "Uploading $LOCAL_PATH -> s3://$BUCKET/$S3_KEY (STANDARD)"
+          aws s3 cp "$LOCAL_PATH" "s3://$BUCKET/$S3_KEY" --storage-class STANDARD --region "$REGION" --no-progress
+
+          # StorageClass peut être null pour STANDARD, on normalize
+          SC=$(aws s3api head-object --bucket "$BUCKET" --key "$S3_KEY" --region "$REGION" --query 'StorageClass' --output text 2>/dev/null || echo "null")
+          if [ -z "$SC" ] || [ "$SC" = "None" ] || [ "$SC" = "null" ]; then SC="STANDARD"; fi
+          if [ "$SC" != "STANDARD" ]; then
+            echo "ERROR: uploaded object storage class is NOT STANDARD (detected: $SC)" >&2
+            exit 1
+          fi
+
+          echo "OK: object uploaded and is STANDARD: s3://$BUCKET/$S3_KEY"
+          echo "S3_KEY=$S3_KEY" >> "$GITHUB_ENV"
+
+      - name: Create EB application version
+        id: create_app_version
+        run: |
+          set -euo pipefail
+          if [ -z "${S3_KEY:-}" ]; then
+            echo "ERROR: S3_KEY not set" >&2
+            exit 1
+          fi
+
+          TS=$(date +%Y%m%d-%H%M%S)
+          VERSION_LABEL="gha-${TS}"
+          echo "Creating ApplicationVersion $VERSION_LABEL pointing to s3://$BUCKET/$S3_KEY"
+          aws elasticbeanstalk create-application-version \
+            --application-name "$APP" \
+            --version-label "$VERSION_LABEL" \
+            --source-bundle S3Bucket="$BUCKET",S3Key="$S3_KEY" \
+            --region "$REGION"
+          echo "VERSION_LABEL=$VERSION_LABEL" >> "$GITHUB_ENV"
+
+      - name: Deploy to EB environment
+        run: |
+          set -euo pipefail
+          if [ -z "${VERSION_LABEL:-}" ]; then
+            echo "ERROR: VERSION_LABEL not set" >&2
+            exit 1
+          fi
+          echo "Requesting update-environment -> $ENV (version: $VERSION_LABEL)"
+          aws elasticbeanstalk update-environment --environment-name "$ENV" --version-label "$VERSION_LABEL" --region "$REGION"
+          echo "Deploy requested: $VERSION_LABEL"
+
+      - name: Post Configure AWS credentials (cleanup)
+        if: always()
+        run: |
+          echo "Done."
