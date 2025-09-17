@@ -1,315 +1,107 @@
-name: Cost Optimization (manual only)
+name: Cost Optimize - Daily Check
 
+# Runs daily and on manual trigger
 on:
+  schedule:
+    - cron: '0 7 * * *'      # every day at 07:00 UTC
   workflow_dispatch:
-    inputs:
-      tf_dir:
-        description: 'Chemin du module Terraform (ex: backend/terraform/modules/cost-optimizer)'
-        required: false
-        default: 'backend/terraform/modules/cost-optimizer'
-      private_subnet_id:
-        description: 'ID du subnet à utiliser (ex: subnet-0abc1234). Laisser vide si non nécessaire'
-        required: false
-        default: ''
-      apply:
-        description: 'true pour exécuter terraform apply (danger : modifie infra)'
-        required: false
-        default: 'false'
-      auto_create_module:
-        description: 'true pour créer automatiquement le module from template si absent (committe sur main)'
-        required: false
-        default: 'false'
-      do_cleanup:
-        description: 'true pour exécuter étapes de nettoyage EBS/EIP (danger : suppression)'
-        required: false
-        default: 'false'
-      do_spot:
-        description: 'true pour convertir ASG de test en instances Spot (ex: rcvo-test-asg)'
-        required: false
-        default: 'false'
-      notify_slack:
-        description: 'true pour envoyer un résumé sur Slack'
-        required: false
-        default: 'false'
-      slack_channel:
-        description: 'canal Slack (optionnel, si webhook multi-canal)'
-        required: false
-        default: ''
+  push:
+    branches: [ "main" ]
 
 permissions:
-  contents: write    # nécessaire si on commit des fichiers
-  id-token: write
+  contents: read
 
 jobs:
-  cost-optimize:
-    name: Cost Optimization
+  cost-analyze:
+    name: Cost analysis (safe)
     runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
-      GIT_COMMITTER_NAME: "github-actions[bot]"
-      GIT_COMMITTER_EMAIL: "actions@github.com"
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET || '' }}
     steps:
-
-      - name: Checkout repository (full)
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Python 3
+        uses: actions/setup-python@v4
         with:
-          fetch-depth: 0
-          persist-credentials: true  # permet push avec GITHUB_TOKEN
+          python-version: '3.10'
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Debug - show workspace & inputs
+      - name: Install dependencies
         run: |
-          echo "GITHUB_WORKSPACE = $GITHUB_WORKSPACE"
-          echo "Requested tf_dir = '${{ github.event.inputs.tf_dir }}'"
-          echo "private_subnet_id = '${{ github.event.inputs.private_subnet_id }}'"
-          echo "apply = '${{ github.event.inputs.apply }}' auto_create_module='${{ github.event.inputs.auto_create_module }}' do_cleanup='${{ github.event.inputs.do_cleanup }}' do_spot='${{ github.event.inputs.do_spot }}' notify_slack='${{ github.event.inputs.notify_slack }}'"
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir boto3 pyyaml
 
-      - name: Ensure tf_dir path is normalized
+      - name: Validate workflow YAML files (quick parse)
         run: |
-          TF_DIR="${{ github.event.inputs.tf_dir }}"
-          # strip leading/trailing slashes
-          TF_DIR="${TF_DIR#/}"
-          TF_DIR="${TF_DIR%/}"
-          echo "TF_DIR=$TF_DIR" >> $GITHUB_ENV
+          python - <<'PY'
+          import sys, yaml, glob
+          ok = True
+          for f in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'):
+              try:
+                  yaml.safe_load(open(f, 'r'))
+              except Exception as e:
+                  print(f"YAML PARSE ERROR in {f}: {e}", file=sys.stderr)
+                  ok = False
+          if not ok:
+              sys.exit(2)
+          print("All workflow YAML parse OK")
+          PY
 
-      - name: Verify tf module exists (or auto-create)
-        id: ensure_module
-        run: |
-          set -euo pipefail
-          TF_DIR="${TF_DIR}"
-          echo "Checking ${TF_DIR}"
-          if [ -d "${TF_DIR}" ]; then
-            echo "module_exists=true" >> $GITHUB_OUTPUT
-            echo "Module exists at ${TF_DIR}"
-            exit 0
-          fi
-          if [ "${{ github.event.inputs.auto_create_module }}" != "true" ]; then
-            echo "::error ::Module Terraform introuvable: ${TF_DIR}. Si vous voulez le créer automatiquement, relancez avec auto_create_module=true"
-            echo "module_exists=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          echo "Auto-creating module at ${TF_DIR} ..."
-          mkdir -p "${TF_DIR}"
-          # main.tf template (corrected)
-          cat > "${TF_DIR}/main.tf" <<'TF'
-# --- main.tf (auto-generated)
-data "aws_ami" "amazon_linux" {
-  most_recent = true
-  owners      = ["amazon"]
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
-  }
-}
-
-data "aws_iam_policy_document" "lambda_assume" {
-  statement {
-    effect = "Allow"
-    principals {
-      type        = "Service"
-      identifiers = ["lambda.amazonaws.com"]
-    }
-    actions = ["sts:AssumeRole"]
-  }
-}
-
-data "aws_iam_policy_document" "lambda_policy" {
-  statement {
-    sid    = "EC2Manage"
-    effect = "Allow"
-    actions = [
-      "ec2:DescribeInstances",
-      "ec2:StartInstances",
-      "ec2:StopInstances",
-      "ec2:DescribeTags"
-    ]
-    resources = ["*"]
-  }
-  statement {
-    sid    = "CloudWatchLogs"
-    effect = "Allow"
-    actions = [
-      "logs:CreateLogGroup",
-      "logs:CreateLogStream",
-      "logs:PutLogEvents"
-    ]
-    resources = ["arn:aws:logs:*:*:*"]
-  }
-}
-
-resource "aws_cloudwatch_event_rule" "stop_nonprod" {
-  name                = "stop-nonprod-instances"
-  schedule_expression = "cron(0 20 ? * MON-FRI *)"
-}
-resource "aws_cloudwatch_event_rule" "start_nonprod" {
-  name                = "start-nonprod-instances"
-  schedule_expression = "cron(0 04 ? * MON-FRI *)"
-}
-
-resource "aws_iam_role" "lambda_exec" {
-  name               = "rcvo-manage-instances-role"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
-}
-
-resource "aws_iam_role_policy" "lambda_policy" {
-  name   = "rcvo-manage-instances-policy"
-  role   = aws_iam_role.lambda_exec.id
-  policy = data.aws_iam_policy_document.lambda_policy.json
-}
-
-resource "aws_lambda_function" "manage_instances" {
-  filename         = "manage_instances.zip"
-  function_name    = "rcvo-manage-instances"
-  handler          = "handler.lambda_handler"
-  runtime          = "python3.9"
-  role             = aws_iam_role.lambda_exec.arn
-  source_code_hash = filebase64sha256("manage_instances.zip")
-  timeout          = 60
-}
-
-resource "aws_cloudwatch_event_target" "stop_target" {
-  rule      = aws_cloudwatch_event_rule.stop_nonprod.name
-  target_id = "stopLambda"
-  arn       = aws_lambda_function.manage_instances.arn
-  input     = jsonencode({ action = "stop", tags = var.instance_tags_to_keep })
-}
-resource "aws_cloudwatch_event_target" "start_target" {
-  rule      = aws_cloudwatch_event_rule.start_nonprod.name
-  target_id = "startLambda"
-  arn       = aws_lambda_function.manage_instances.arn
-  input     = jsonencode({ action = "start", tags = var.instance_tags_to_keep })
-}
-
-resource "aws_instance" "rcvo_nat" {
-  ami                         = data.aws_ami.amazon_linux.id
-  instance_type               = "t3.nano"
-  subnet_id                   = var.private_subnet_id
-  associate_public_ip_address = false
-  source_dest_check           = false
-  tags = { Name = "Rcvo-NAT-Instance" }
-}
-
-resource "aws_eip" "rcvo_nat_eip" {
-  instance = aws_instance.rcvo_nat.id
-  vpc      = true
-}
-TF
-
-          # variables.tf
-          cat > "${TF_DIR}/variables.tf" <<'TF'
-variable "instance_tags_to_keep" {
-  description = "Liste des tags des instances à démarrer/arrêter"
-  type        = list(string)
-  default     = ["Rcvo-Server", "Rcvo-Backend-lb", "Rcvo-Backend-env", "Rcvo-Backend-prod"]
-}
-
-variable "private_subnet_id" {
-  description = "ID du subnet pour la NAT instance"
-  type        = string
-  default     = ""
-}
-TF
-
-          # outputs.tf
-          cat > "${TF_DIR}/outputs.tf" <<'TF'
-output "lambda_function_arn" {
-  description = "ARN de la Lambda de gestion des instances"
-  value       = aws_lambda_function.manage_instances.arn
-}
-TF
-
-          # create placeholder lambda handler and zip
-          mkdir -p /tmp/rcvo_lambda_build
-          cat > /tmp/rcvo_lambda_build/handler.py <<'PY'
-def lambda_handler(event, context):
-    action = event.get("action")
-    tags = event.get("tags", [])
-    return {"action": action, "tags": tags}
-PY
-          (cd /tmp/rcvo_lambda_build && zip -r manage_instances.zip handler.py)
-          mv /tmp/rcvo_lambda_build/manage_instances.zip "${TF_DIR}/manage_instances.zip"
-          git add "${TF_DIR}"
-          git -c user.name='github-actions[bot]' -c user.email='actions@github.com' commit -m "chore: auto-create cost-optimizer module (auto_create_module=true)"
-          git push origin HEAD:main || true
-          echo "module_exists=true" >> $GITHUB_OUTPUT
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: '1.6.0'
-
-      - name: Terraform Init & Plan
-        id: tf_plan
-        working-directory: ${{ env.GITHUB_WORKSPACE }}/${{ github.event.inputs.tf_dir }}
-        run: |
-          set -euo pipefail
-          echo "Running terraform init..."
-          terraform init -input=false
-          echo "Running terraform plan..."
-          if [ -n "${{ github.event.inputs.private_subnet_id }}" ]; then
-            terraform plan -input=false -var="private_subnet_id=${{ github.event.inputs.private_subnet_id }}" -out=tfplan
-          else
-            terraform plan -input=false -out=tfplan
-          fi
-          echo "Plan completed"
-
-      - name: Terraform Apply (only if requested)
-        if: ${{ github.event.inputs.apply == 'true' }}
-        working-directory: ${{ env.GITHUB_WORKSPACE }}/${{ github.event.inputs.tf_dir }}
-        run: |
-          set -euo pipefail
-          terraform apply -input=false -auto-approve tfplan
-
-      - name: Optional: Cleanup unattached EBS volumes
-        if: ${{ github.event.inputs.do_cleanup == 'true' }}
-        run: |
-          echo "Cleaning up unattached EBS volumes (available) ..."
-          for vol in $(aws ec2 describe-volumes --filters Name=status,Values=available --query "Volumes[].VolumeId" --output text || true); do
-            echo "Deleting volume $vol"
-            aws ec2 delete-volume --volume-id "$vol" || true
-          done
-          echo "Releasing unused Elastic IPs ..."
-          for alloc in $(aws ec2 describe-addresses --query "Addresses[?AssociationId==null].AllocationId" --output text || true); do
-            echo "Releasing $alloc"
-            aws ec2 release-address --allocation-id "$alloc" || true
-          done
-
-      - name: Optional: Convert ASG to Spot (example)
-        if: ${{ github.event.inputs.do_spot == 'true' }}
-        run: |
-          ASG_NAME="rcvo-test-asg"
-          echo "Converting ASG ${ASG_NAME} to use mixed instances (spot)..."
-          # This is an example: adjust instance types / policy JSON as needed
-          aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$ASG_NAME" --mixed-instances-policy '{
-            "LaunchTemplate": { "LaunchTemplateSpecification": { "LaunchTemplateId": "lt-xxxx", "Version": "$Latest" } },
-            "InstancesDistribution": { "OnDemandBaseCapacity": 0, "OnDemandPercentageAboveBaseCapacity": 0 }
-          }' || echo "ASG update failed or needs manual adjustment"
-
-      - name: Summary & outputs
-        id: summary
-        run: |
-          echo "apply=${{ github.event.inputs.apply }}" > summary.txt
-          echo "tf_dir=${{ github.event.inputs.tf_dir }}" >> summary.txt
-          echo "private_subnet_id='${{ github.event.inputs.private_subnet_id }}'" >> summary.txt
-          echo "auto_create_module=${{ github.event.inputs.auto_create_module }}" >> summary.txt
-          echo "do_cleanup=${{ github.event.inputs.do_cleanup }}" >> summary.txt
-          echo "do_spot=${{ github.event.inputs.do_spot }}" >> summary.txt
-          echo "Done" && cat summary.txt
-
-      - name: Notify Slack (optional)
-        if: ${{ github.event.inputs.notify_slack == 'true' && secrets.SLACK_WEBHOOK_URL }}
+      - name: Gather AWS account info (read-only)
         env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
-          PAYLOAD=$(jq -n --arg txt "Cost Optimize run: $GITHUB_REPOSITORY #${GITHUB_RUN_NUMBER} - apply=${{ github.event.inputs.apply }}, tf_dir=${{ github.event.inputs.tf_dir }}, subnet=${{ github.event.inputs.private_subnet_id }}" '{text:$txt}')
-          curl -sS -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK" || true
+          set -euo pipefail
+          echo "AWS CLI version: $(aws --version 2>&1 || true)"
+          echo "Listing account identity..."
+          aws sts get-caller-identity --output json || true
 
-      - name: Post actions/cleanup
+      - name: Optional: Run cost estimation script if present
         run: |
-          echo "Job complete."
+          set -euo pipefail
+          if [ -x "./scripts/cost-optimize.sh" ]; then
+            echo "Found ./scripts/cost-optimize.sh — executing (safe mode)"
+            ./scripts/cost-optimize.sh || echo "script failed (allowed)"
+          else
+            echo "No cost optimization script found at ./scripts/cost-optimize.sh — skipping"
+          fi
+
+      - name: Quick S3 storage-class check (non-destructive)
+        if: ${{ secrets.S3_BUCKET != '' }}
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          KEY_BASE="cost-optimize-check-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}"
+          TEMP_KEY="tmp/${KEY_BASE}.txt"
+          ARCHIVE_KEY="archive/${KEY_BASE}.txt"
+          echo "ping" > /tmp/${KEY_BASE}.txt
+
+          echo "Uploading test object to s3://${S3_BUCKET}/${TEMP_KEY}"
+          aws s3 cp /tmp/${KEY_BASE}.txt s3://${S3_BUCKET}/${TEMP_KEY} --region "${AWS_REGION}" --only-show-errors
+
+          # copy to archive/ explicitly with storage-class STANDARD (server side); some endpoints ignore, it's ok
+          aws s3 cp s3://${S3_BUCKET}/${TEMP_KEY} s3://${S3_BUCKET}/${ARCHIVE_KEY} --region "${AWS_REGION}" --storage-class STANDARD --only-show-errors
+
+          SC=$(aws s3api head-object --bucket "${S3_BUCKET}" --key "${ARCHIVE_KEY}" --query 'StorageClass' --output text --region "${AWS_REGION}" || echo "")
+          echo "Raw StorageClass read: '${SC}'"
+
+          # Accept empty/None/null as STANDARD (some S3 APIs/regions return null/None for STANDARD)
+          if [ "${SC}" = "STANDARD" ] || [ -z "${SC}" ] || [ "${SC}" = "None" ] || [ "${SC}" = "null" ]; then
+            echo "StorageClass OK (interpreted as STANDARD)."
+          else
+            echo "WARNING: StorageClass is not STANDARD: ${SC}"
+          fi
+
+          # cleanup (best-effort)
+          aws s3 rm s3://${S3_BUCKET}/${TEMP_KEY} --region "${AWS_REGION}" >/dev/null 2>&1 || true
+          aws s3 rm s3://${S3_BUCKET}/${ARCHIVE_KEY} --region "${AWS_REGION}" >/dev/null 2>&1 || true
+          rm -f /tmp/${KEY_BASE}.txt || true
+
+      - name: Report summary
+        run: |
+          echo "Cost Optimize job finished. No destructive actions performed by default."
