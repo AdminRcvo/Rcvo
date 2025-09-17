@@ -1,12 +1,11 @@
 name: Cost Optimize - Daily Check
 
-# Runs daily and on manual trigger
 on:
   schedule:
     - cron: '0 7 * * *'      # every day at 07:00 UTC
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -19,7 +18,6 @@ jobs:
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      # Do NOT use "||" in expressions. If the secret is unset it will be empty.
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
     steps:
       - name: Checkout repository
@@ -57,7 +55,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "AWS CLI version: $(aws --version 2>&1 || true)"
-          echo "Listing account identity..."
           aws sts get-caller-identity --output json || true
 
       - name: Optional: Run cost estimation script if present
@@ -67,11 +64,10 @@ jobs:
             echo "Found ./scripts/cost-optimize.sh — executing (safe mode)"
             ./scripts/cost-optimize.sh || echo "script failed (allowed)"
           else
-            echo "No cost optimization script found at ./scripts/cost-optimize.sh — skipping"
+            echo "No ./scripts/cost-optimize.sh found — skipping"
           fi
 
       - name: Quick S3 storage-class check (non-destructive)
-        # run this step only if S3_BUCKET secret is non-empty
         if: ${{ secrets.S3_BUCKET != '' }}
         env:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
@@ -86,21 +82,18 @@ jobs:
           echo "Uploading test object to s3://${S3_BUCKET}/${TEMP_KEY}"
           aws s3 cp /tmp/${KEY_BASE}.txt s3://${S3_BUCKET}/${TEMP_KEY} --region "${AWS_REGION}" --only-show-errors
 
-          # copy to archive/ explicitly with storage-class STANDARD (server side)
+          # copy to archive/ explicitly with storage-class STANDARD
           aws s3 cp s3://${S3_BUCKET}/${TEMP_KEY} s3://${S3_BUCKET}/${ARCHIVE_KEY} --region "${AWS_REGION}" --storage-class STANDARD --only-show-errors
 
-          # read head-object; StorageClass may be missing (null) for STANDARD
           SC=$(aws s3api head-object --bucket "${S3_BUCKET}" --key "${ARCHIVE_KEY}" --query 'StorageClass' --output text --region "${AWS_REGION}" || echo "")
           echo "Raw StorageClass read: '${SC}'"
 
-          # Accept empty/None/null as STANDARD (some S3 APIs/regions return null/None for STANDARD)
           if [ "${SC}" = "STANDARD" ] || [ -z "${SC}" ] || [ "${SC}" = "None" ] || [ "${SC}" = "null" ]; then
             echo "StorageClass OK (interpreted as STANDARD)."
           else
             echo "WARNING: StorageClass is not STANDARD: ${SC}"
           fi
 
-          # cleanup test objects (best-effort)
           aws s3 rm s3://${S3_BUCKET}/${TEMP_KEY} --region "${AWS_REGION}" >/dev/null 2>&1 || true
           aws s3 rm s3://${S3_BUCKET}/${ARCHIVE_KEY} --region "${AWS_REGION}" >/dev/null 2>&1 || true
           rm -f /tmp/${KEY_BASE}.txt || true
