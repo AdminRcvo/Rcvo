@@ -15,11 +15,14 @@ jobs:
       run:
         shell: bash
 
+    # job-level environment variables (pulled from repo Secrets)
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
+      EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}
 
     steps:
       - name: Checkout code
@@ -56,6 +59,7 @@ jobs:
       - name: Build frontend (if UI present)
         if: ${{ steps.detect_ui.outputs.ui_present == 'true' }}
         run: |
+          set -euo pipefail
           cd ui
           npm ci
           npm run build --if-present
@@ -67,13 +71,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # read EB app/env names from secrets via env set below (safer)
+          # validate required EB secrets exist (explicit error)
           if [ -z "${EB_APP_NAME:-}" ] || [ -z "${EB_ENV_NAME:-}" ]; then
             echo "ERROR: EB_APP_NAME and EB_ENV_NAME must be set in repository Secrets."
             exit 2
           fi
 
-          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-8)
+          SHORT_SHA=$(echo "${GITHUB_SHA:-unknown}" | cut -c1-8)
           TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
           ARCHIVE_NAME="rcvo-deploy-${TIMESTAMP}-${SHORT_SHA}.tar.gz"
 
@@ -81,41 +85,41 @@ jobs:
           ARCHIVE_PATH="${TMPDIR}/${ARCHIVE_NAME}"
 
           echo "Creating archive at ${ARCHIVE_PATH} (excluded: .git, node_modules, ui/node_modules)"
+          # from repo root, exclude common big dirs
           tar --exclude='.git' --exclude='node_modules' --exclude='ui/node_modules' -czf "${ARCHIVE_PATH}" .
 
           # export outputs
           echo "archive_path=${ARCHIVE_PATH}" >> "$GITHUB_OUTPUT"
           echo "archive_name=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
-        env:
-          EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
-          EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}
 
       - id: upload_s3
         name: Upload tarball to S3 (STANDARD) and confirm storage class
         env:
-          ARCHIVE_PATH: ${{ steps.make_tar.outputs.archive_path }}
-          ARCHIVE_NAME: ${{ steps.make_tar.outputs.archive_name }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
 
+          ARCHIVE_PATH="${{ steps.make_tar.outputs.archive_path }}"
+          ARCHIVE_NAME="${{ steps.make_tar.outputs.archive_name }}"
           S3_KEY="archive/${ARCHIVE_NAME}"
 
           echo "Uploading ${ARCHIVE_PATH} to s3://${S3_BUCKET}/${S3_KEY} (STANDARD)"
+          # use --only-show-errors to reduce noisy progress; aws cli still prints progress to stderr in some environments
           aws s3 cp "${ARCHIVE_PATH}" "s3://${S3_BUCKET}/${S3_KEY}" --storage-class STANDARD --only-show-errors
 
-          # head-object may not return StorageClass for STANDARD (it returns nothing),
-          # so treat empty as STANDARD.
+          # get StorageClass robustly (if missing/empty, treat as STANDARD)
           SC=$(aws s3api head-object --bucket "${S3_BUCKET}" --key "${S3_KEY}" --query 'StorageClass' --output text 2>/dev/null || echo "")
+          echo "StorageClass for s3://${S3_BUCKET}/${S3_KEY} => '${SC}'"
+
           if [ -z "${SC}" ] || [ "${SC}" = "STANDARD" ]; then
-            echo "StorageClass for s3://${S3_BUCKET}/${S3_KEY} => ${SC:-STANDARD}"
+            echo "StorageClass OK (interpreted as STANDARD)."
           else
             echo "ERROR: uploaded object storage class is not STANDARD (found: ${SC})"
             exit 3
           fi
 
-          # set outputs
+          # export outputs
           echo "s3_key=${S3_KEY}" >> "$GITHUB_OUTPUT"
           echo "s3_bucket=${S3_BUCKET}" >> "$GITHUB_OUTPUT"
 
@@ -135,8 +139,7 @@ jobs:
             exit 4
           fi
 
-          VERSION_LABEL="deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}-$(echo ${GITHUB_SHA} | cut -c1-8)"
-
+          VERSION_LABEL="deploy-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_NUMBER:-0}-$(echo ${GITHUB_SHA:-unknown} | cut -c1-8)"
           echo "Creating application version '${VERSION_LABEL}' for app '${APP}' from s3://${ARCHIVE_S3_BUCKET}/${ARCHIVE_S3_KEY}"
 
           aws elasticbeanstalk create-application-version \
@@ -167,7 +170,7 @@ jobs:
               --application-name "${APP}" \
               --version-labels "${VERSION}" \
               --region "${AWS_REGION}" \
-              --query 'ApplicationVersions[0].VersionLabel' --output text || echo "")
+              --query 'ApplicationVersions[0].VersionLabel' --output text 2>/dev/null || echo "")
             if [ "${FOUND}" = "${VERSION}" ]; then
               echo "Application version visible."
               exit 0
@@ -188,6 +191,7 @@ jobs:
           set -euo pipefail
           ENVNAME="${EB_ENV_NAME:-}"
           VERSION="${{ steps.create_app_version.outputs.version_label }}"
+
           if [ -z "${ENVNAME}" ]; then
             echo "ERROR: EB_ENV_NAME secret is not set."
             exit 7
