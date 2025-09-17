@@ -1,205 +1,75 @@
 name: Deploy to Elastic Beanstalk
-
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
 
 permissions:
   contents: read
 
-env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  S3_BUCKET: ${{ secrets.S3_BUCKET }}
-  S3_PREFIX: ${{ secrets.S3_PREFIX }}
-  ARCHIVE_PREFIX: archive
-  EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
-  EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}
-
 jobs:
   deploy:
+    name: Deploy to Elastic Beanstalk
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout code
-        id: checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install jq (used for debugging if needed)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
-      - name: Detect UI (./ui/package.json) presence
+      - name: Detect UI presence (./ui/package.json)
         id: detect_ui
         run: |
           if [ -f "./ui/package.json" ]; then
-            echo "ui_present=true" >> $GITHUB_OUTPUT
+            echo "ui_present=true" >> "$GITHUB_OUTPUT"
           else
-            echo "ui_present=false" >> $GITHUB_OUTPUT
+            echo "ui_present=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Setup Node (if UI present)
+      - name: Setup Node.js (if UI present)
         if: steps.detect_ui.outputs.ui_present == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "18"
 
       - name: Build frontend (if UI present)
         if: steps.detect_ui.outputs.ui_present == 'true'
-        working-directory: ./ui
         run: |
-          set -euo pipefail
+          cd ui
           npm ci
-          npm run build
+          npm run build --if-present
 
       - name: Create stable snapshot tarball (safe, in temp dir)
         id: make_tar
         run: |
           set -euo pipefail
-
-          # Validate required secrets early with clear error codes
-          if [ -z "${EB_APP_NAME:-}" ] || [ -z "${EB_ENV_NAME:-}" ]; then
-            echo "ERROR: EB_APP_NAME and EB_ENV_NAME must be set in repository Secrets."
-            exit 2
-          fi
-          if [ -z "${S3_BUCKET:-}" ]; then
-            echo "ERROR: S3_BUCKET must be set in repository Secrets."
-            exit 2
-          fi
-
-          TS=$(date -u +%Y%m%d-%H%M%S)
-          SHORT_SHA=${GITHUB_SHA::8}
-          TAR_NAME="rcvo-deploy-${TS}-${SHORT_SHA}.tar.gz"
-
           TMPDIR=$(mktemp -d)
-          echo "Creating stable snapshot: ${TAR_NAME} in ${TMPDIR}"
+          ARCHIVE_NAME="rcvo-deploy-$(date +%Y%m%d-%H%M%S).tar.gz"
+          ARCHIVE_PATH="$TMPDIR/$ARCHIVE_NAME"
+          echo "Creating archive: $ARCHIVE_PATH"
+          # Exclude .git and node_modules to reduce size; adapte si besoin
+          tar --exclude='.git' --exclude='node_modules' --exclude='ui/node_modules' -czf "$ARCHIVE_PATH" .
+          echo "archive_path=$ARCHIVE_PATH" >> "$GITHUB_OUTPUT"
+          echo "archive_name=$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
+        # pas besoin d'env AWS ici
 
-          tar --exclude='.git' --exclude='.github' -czf "${TMPDIR}/${TAR_NAME}" -C "${GITHUB_WORKSPACE}" .
-
-          if [ ! -f "${TMPDIR}/${TAR_NAME}" ]; then
-            echo "ERROR creating tarball"
-            exit 1
-          fi
-
-          echo "archive_path=${TMPDIR}/${TAR_NAME}" >> $GITHUB_OUTPUT
-          echo "archive_name=${TAR_NAME}" >> $GITHUB_OUTPUT
-          echo "tmpdir=${TMPDIR}" >> $GITHUB_OUTPUT
-
-      - name: Upload tarball to S3 (STANDARD) and confirm storage class
+      - name: Upload tarball to S3 (STANDARD) and verify
         id: upload_s3
-        run: |
-          set -euo pipefail
-          ARCHIVE_PATH="${{ steps.make_tar.outputs.archive_path }}"
-
-          PREFIX="${S3_PREFIX:-rcvo-backend}" # fallback if S3_PREFIX not set
-          BUCKET="${S3_BUCKET}"
-          ARCHIVE_NAME="${{ steps.make_tar.outputs.archive_name }}"
-          ARCHIVE_KEY="${ARCHIVE_PREFIX}/${ARCHIVE_NAME}"
-
-          echo "Uploading ${ARCHIVE_PATH} to s3://${BUCKET}/${ARCHIVE_KEY} (STANDARD)"
-          aws s3 cp "${ARCHIVE_PATH}" "s3://${BUCKET}/${ARCHIVE_KEY}" --storage-class STANDARD --region "${AWS_REGION}"
-
-          OBJ_JSON=$(aws s3api head-object --bucket "$BUCKET" --key "${ARCHIVE_KEY}" --region "${AWS_REGION}" --output json)
-          echo "s3_head=${OBJ_JSON}" >> $GITHUB_OUTPUT
-          echo "s3_key=${ARCHIVE_KEY}" >> $GITHUB_OUTPUT
-
-      - name: Create EB application version
-        id: create_app_version
-        run: |
-          set -euo pipefail
-          BUCKET="${S3_BUCKET}"
-          S3_KEY="${{ steps.upload_s3.outputs.s3_key }}"
-          APP_NAME="${EB_APP_NAME}"
-          VERSION_LABEL="gh-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-          if [ -z "$APP_NAME" ]; then
-            echo "ERROR: EB_APP_NAME must be set as a repo secret."
-            exit 2
-          fi
-
-          echo "Creating application version ${VERSION_LABEL} pointing to s3://${BUCKET}/${S3_KEY}"
-          aws elasticbeanstalk create-application-version \
-            --application-name "$APP_NAME" \
-            --version-label "$VERSION_LABEL" \
-            --source-bundle S3Bucket="$BUCKET",S3Key="$S3_KEY" \
-            --region "${AWS_REGION}" \
-            --auto-create-application || true
-
-          echo "version_label=${VERSION_LABEL}" >> $GITHUB_OUTPUT
-
-      - name: Wait for application version visible
-        id: wait_version
-        run: |
-          set -euo pipefail
-          APP_NAME="${EB_APP_NAME}"
-          VERSION_LABEL="${{ steps.create_app_version.outputs.version_label }}"
-          REGION="${AWS_REGION}"
-
-          for i in $(seq 1 30); do
-            OUT=$(aws elasticbeanstalk describe-application-versions \
-              --application-name "$APP_NAME" \
-              --version-labels "$VERSION_LABEL" \
-              --region "$REGION" --output json 2>/dev/null || true)
-            count=$(echo "$OUT" | jq '.ApplicationVersions | length' 2>/dev/null || echo 0)
-            if [ "$count" != "0" ]; then
-              echo "found"
-              exit 0
-            fi
-            sleep 2
-          done
-
-          echo "WARN: application version not visible after timeout (but continuing)."
-          exit 0
-
-      - name: Deploy new version to EB environment
-        id: deploy_env
-        run: |
-          set -euo pipefail
-          ENV_NAME="${EB_ENV_NAME}"
-          APP_NAME="${EB_APP_NAME}"
-          VERSION_LABEL="${{ steps.create_app_version.outputs.version_label }}"
-          REGION="${AWS_REGION}"
-
-          if [ -z "$ENV_NAME" ]; then
-            echo "ERROR: EB_ENV_NAME must be set as a repo secret."
-            exit 2
-          fi
-
-          echo "Updating environment ${ENV_NAME} -> version ${VERSION_LABEL}"
-          aws elasticbeanstalk update-environment \
-            --environment-name "$ENV_NAME" \
-            --version-label "$VERSION_LABEL" \
-            --region "$REGION"
-
-      - name: Describe environment (short summary)
-        run: |
-          set -euo pipefail
-          ENV_NAME="${EB_ENV_NAME}"
-          REGION="${AWS_REGION}"
-          aws elasticbeanstalk describe-environments \
-            --environment-names "$ENV_NAME" \
-            --region "$REGION" \
-            --query 'Environments[0].[EnvironmentName,Status,Health,VersionLabel,DateUpdated]' \
-            --output table || true
-
-      - name: Cleanup TMP (best-effort)
-        if: always()
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          TMPDIR="${{ steps.make_tar.outputs.tmpdir }}"
-          if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
-            echo "Cleaning tmpdir $TMPDIR"
-            rm -rf "$TMPDIR"
-          else
-            echo "No tmpdir to clean"
-          fi
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          S3_BUCKET:_
