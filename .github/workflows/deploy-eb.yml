@@ -9,10 +9,11 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  S3_BUCKET: ${{ secrets.S3_BUCKET }}
-  EB_APPLICATION_NAME: ${{ secrets.EB_APPLICATION_NAME }}
-  EB_ENVIRONMENT_NAME: ${{ secrets.EB_ENVIRONMENT_NAME }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}              # ex: eu-west-3
+  S3_BUCKET: ${{ secrets.S3_BUCKET }}                # ex: elasticbeanstalk-eu-west-3-...
+  S3_PREFIX: rcvo-backend                             # prefix dans le bucket
+  EB_APP_NAME: ${{ secrets.EB_APP_NAME }}            # <-- DOIT être défini en Secrets
+  EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}            # <-- DOIT être défini en Secrets
 
 jobs:
   deploy:
@@ -22,109 +23,165 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          # optional session token
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN || '' }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup Node.js (for frontend build if present)
+      - name: Setup Node (for frontend build, if present)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
+      # ---- detect if UI exists (replaces invalid 'exists()' expression) ----
       - name: Check for UI (detect ./ui/package.json)
-        id: check-ui
+        id: check_ui
         run: |
-          set -euo pipefail
+          echo "ui_present=false" >> "$GITHUB_OUTPUT"
           if [ -f "./ui/package.json" ]; then
-            echo "ui_exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ui_exists=false" >> "$GITHUB_OUTPUT"
+            echo "ui_present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build frontend (if exists)
-        if: ${{ steps.check-ui.outputs.ui_exists == 'true' }}
+      - name: Build frontend if present
+        if: steps.check_ui.outputs.ui_present == 'true'
         working-directory: ./ui
         run: |
           set -euo pipefail
           npm ci
-          npm run build || true
+          npm run build || true   # tolerate build scripts that exit non-zero but normally should succeed
 
-      - name: Create dereferenced stable tarball (snapshot)
+      # ---- create a stable dereferenced tarball (avoid tar-changing-as-we-read) ----
+      - name: Create stable snapshot tarball
         id: make_tar
         run: |
           set -euo pipefail
-          echo "Creating stable snapshot tarball..."
-          # Prepare names
-          TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
-          TAR_NAME="rcvo-deploy-${TIMESTAMP}.tar.gz"
-          # Prepare tmp snapshot dir
-          TMPDIR=$(mktemp -d)
-          SNAP="$TMPDIR/export"
-          mkdir -p "$SNAP"
-          # Copy workspace into snapshot excluding .git, node_modules and github actions temp files
-          rsync -a --delete \
+          echo "Creating stable snapshot tarball"
+
+          SHA_SHORT=${GITHUB_SHA:0:8}
+          VERSION_LABEL="gh-${GITHUB_RUN_ID}-${SHA_SHORT}"
+          TAR_NAME="rcvo-deploy-${SHA_SHORT}.tar.gz"
+          TMP_DIR=$(mktemp -d)
+
+          echo "TMP_DIR=${TMP_DIR}"
+          echo "VERSION_LABEL=${VERSION_LABEL}"
+          echo "TAR_NAME=${TAR_NAME}"
+
+          # copy workspace to a clean temporary dir (exclude heavy / irrelevant files)
+          mkdir -p "${TMP_DIR}/pkg"
+          rsync -a --info=progress2 \
             --exclude='.git' \
             --exclude='.github' \
             --exclude='node_modules' \
+            --exclude='.venv' \
+            --exclude='*.tgz' \
             --exclude='*.tar.gz' \
-            --exclude='*.log' \
-            ./ "$SNAP/"
-          # if ui build exists, ensure built assets included (already in ./ui if built)
-          # Create tarball from the snapshot (stable)
-          tar -C "$SNAP" -czf "$TAR_NAME" .
-          # expose outputs
-          echo "archive_name=$TAR_NAME" >> "$GITHUB_OUTPUT"
-          echo "archive_path=$PWD/$TAR_NAME" >> "$GITHUB_OUTPUT"
-        shell: bash
+            ./ "${TMP_DIR}/pkg/"
 
+          # if UI build exists, ensure it's included (ui/build)
+          if [ -d "./ui/build" ]; then
+            echo "Including ui/build into package"
+            rsync -a ./ui/build/ "${TMP_DIR}/pkg/ui/build/"
+          fi
+
+          # create tar from the clean tree (stable)
+          (cd "${TMP_DIR}/pkg" && tar -czf "${GITHUB_WORKSPACE}/${TAR_NAME}" .)
+          echo "ARCHIVE_PATH=${GITHUB_WORKSPACE}/${TAR_NAME}" >> "$GITHUB_OUTPUT"
+          echo "TAR_NAME=${TAR_NAME}" >> "$GITHUB_OUTPUT"
+          echo "VERSION_LABEL=${VERSION_LABEL}" >> "$GITHUB_OUTPUT"
+
+      # ---- upload archive to S3 (STANDARD) ----
       - name: Upload tarball to S3 (STANDARD)
         id: upload_s3
         run: |
           set -euo pipefail
-          ARCHIVE_PATH="${{ steps.make_tar.outputs.archive_path }}"
-          ARCHIVE_NAME="${{ steps.make_tar.outputs.archive_name }}"
-          S3_KEY="rcvo-backend/${ARCHIVE_NAME}"
-          echo "Uploading ${ARCHIVE_NAME} to s3://${{ env.S3_BUCKET }}/${S3_KEY} (STANDARD)"
-          aws s3 cp "$ARCHIVE_PATH" "s3://${{ env.S3_BUCKET }}/${S3_KEY}" --storage-class STANDARD --region "${{ env.AWS_REGION }}"
-          # get head-object to confirm
-          aws s3api head-object \
-            --bucket "${{ env.S3_BUCKET }}" \
-            --key "${S3_KEY}" \
-            --region "${{ env.AWS_REGION }}" \
-            --query '{Key:Key,StorageClass:StorageClass,Size:ContentLength}' > s3_head.json
-          echo "s3_key=${S3_KEY}" >> "$GITHUB_OUTPUT"
-          echo "s3_head=$(cat s3_head.json | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          ARCHIVE_PATH="${{ steps.make_tar.outputs.ARCHIVE_PATH }}"
+          TAR_NAME="${{ steps.make_tar.outputs.TAR_NAME }}"
+          S3_KEY="${S3_PREFIX}/${TAR_NAME}"
+          echo "Uploading ${ARCHIVE_PATH} to s3://${S3_BUCKET}/${S3_KEY}"
+          aws s3 cp "${ARCHIVE_PATH}" "s3://${S3_BUCKET}/${S3_KEY}" --region "${AWS_REGION}" --storage-class STANDARD
 
+          # basic verification (content length)
+          aws s3api head-object --bucket "${S3_BUCKET}" --key "${S3_KEY}" --region "${AWS_REGION}" \
+            --query '{Key:Key,Size:ContentLength,StorageClass:StorageClass}' --output json
+
+          echo "s3_key=${S3_KEY}" >> "$GITHUB_OUTPUT"
+
+      # ---- create EB application version ----
       - name: Create EB application version
-        id: create_app_version
+        id: create_appver
         run: |
           set -euo pipefail
-          if [ -z "${{ env.EB_APPLICATION_NAME }}" ]; then
-            echo "ERROR: EB_APPLICATION_NAME is empty. Please set repository secret EB_APPLICATION_NAME."
+
+          # sanity checks
+          if [ -z "${EB_APP_NAME:-}" ] || [ -z "${EB_ENV_NAME:-}" ]; then
+            echo "ERROR: EB_APP_NAME and EB_ENV_NAME must be set (in repository Secrets)."
             exit 2
           fi
-          if [ -z "${{ steps.upload_s3.outputs.s3_key }}" ]; then
-            echo "ERROR: s3_key is empty. Upload failed earlier?"
-            exit 3
-          fi
-          VERSION_LABEL="gh-${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}-${{ github.sha::8 }}"
+
           S3_KEY="${{ steps.upload_s3.outputs.s3_key }}"
-          echo "Creating application version ${VERSION_LABEL} pointing to s3://${{ env.S3_BUCKET }}/${S3_KEY}"
+          VERSION_LABEL="${{ steps.make_tar.outputs.VERSION_LABEL }}"
+
+          echo "Creating application version ${VERSION_LABEL} pointing to s3://${S3_BUCKET}/${S3_KEY}"
           aws elasticbeanstalk create-application-version \
-            --application-name "${{ env.EB_APPLICATION_NAME }}" \
+            --application-name "${EB_APP_NAME}" \
             --version-label "${VERSION_LABEL}" \
-            --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${S3_KEY}" \
-            --auto-create-application \
-            --region "${{ env.AWS_REGION }}"
+            --source-bundle S3Bucket="${S3_BUCKET}",S3Key="${S3_KEY}" \
+            --region "${AWS_REGION}"
+
           echo "version_label=${VERSION_LABEL}" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for application version visibl
+      # ---- wait for app version to be visible (short loop) ----
+      - name: Wait for application version visible
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.create_appver.outputs.version_label }}"
+          ATTEMPTS=0
+          MAX=12
+          while [ $ATTEMPTS -lt $MAX ]; do
+            sleep 5
+            echo "Checking visibility attempt=$ATTEMPTS"
+            OUT=$(aws elasticbeanstalk describe-application-versions \
+              --application-name "${EB_APP_NAME}" \
+              --version-labels "${VERSION}" \
+              --region "${AWS_REGION}" \
+              --output json)
+            COUNT=$(echo "$OUT" | jq '.ApplicationVersions | length')
+            if [ "$COUNT" -ge 1 ]; then
+              echo "Application version visible."
+              exit 0
+            fi
+            ATTEMPTS=$((ATTEMPTS+1))
+          done
+          echo "Timed out waiting for application version to appear"
+          exit 1
+
+      # ---- deploy to EB environment ----
+      - name: Deploy new version to EB environment
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.create_appver.outputs.version_label }}"
+          echo "Updating environment ${EB_ENV_NAME} -> version ${VERSION}"
+          aws elasticbeanstalk update-environment \
+            --environment-name "${EB_ENV_NAME}" \
+            --version-label "${VERSION}" \
+            --region "${AWS_REGION}"
+          # short describe to show status
+          aws elasticbeanstalk describe-environments \
+            --environment-names "${EB_ENV_NAME}" \
+            --region "${AWS_REGION}" \
+            --query "Environments[0].[EnvironmentName,Status,Health,VersionLabel,DateUpdated]" \
+            --output table
+
+      # ---- cleanup (best-effort) ----
+      - name: Cleanup TMP (best-effort)
+        if: always()
+        run: |
+          set -euo pipefail || true
+          # nothing strict here — runner cleans up, but remove created artifact if exists
+          ART="${{ steps.make_tar.outputs.ARCHIVE_PATH }}"
+          if [ -n "${ART:-}" ] && [ -f "${ART}" ]; then
+            rm -f "${ART}" || true
+          fi
