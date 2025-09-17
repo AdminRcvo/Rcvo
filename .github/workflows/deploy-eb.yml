@@ -8,12 +8,11 @@ permissions:
   contents: read
 
 env:
-  # fallback values (can be overridden via repo Secrets)
+  # Values must exist as repository Secrets; if some are omitted, the workflow will error early with a clear message.
   AWS_REGION: ${{ secrets.AWS_REGION }}
   S3_BUCKET: ${{ secrets.S3_BUCKET }}
-  S3_PREFIX: ${{ secrets.S3_PREFIX || 'rcvo-backend' }}
+  S3_PREFIX: ${{ secrets.S3_PREFIX }}   # optional: if empty, step will default to 'rcvo-backend'
   ARCHIVE_PREFIX: archive
-  # EB app/env must be provided as secrets
   EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
   EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}
 
@@ -64,21 +63,28 @@ jobs:
         id: make_tar
         run: |
           set -euo pipefail
-          # sanity checks
+
+          # Validate required secrets early with clear error codes
           if [ -z "${EB_APP_NAME:-}" ] || [ -z "${EB_ENV_NAME:-}" ]; then
-            echo "ERROR: EB_APP_NAME and EB_ENV_NAME must be set (in repository Secrets)."
+            echo "ERROR: EB_APP_NAME and EB_ENV_NAME must be set in repository Secrets."
             exit 2
           fi
-          # build names
+          if [ -z "${S3_BUCKET:-}" ]; then
+            echo "ERROR: S3_BUCKET must be set in repository Secrets."
+            exit 2
+          fi
+
           TS=$(date -u +%Y%m%d-%H%M%S)
           SHORT_SHA=${GITHUB_SHA::8}
           TAR_NAME="rcvo-deploy-${TS}-${SHORT_SHA}.tar.gz"
 
-          # create a unique temp dir and tar from workspace root into tmp (avoid including the tar itself)
           TMPDIR=$(mktemp -d)
-          echo "Creating stable snapshot: ${TAR_NAME}"
-          # -C to change to workspace root and tar contents (excluding .git and .github)
+          echo "Creating stable snapshot: ${TAR_NAME} in ${TMPDIR}"
+
+          # Archive workspace contents excluding .git and .github to avoid changing files while reading
+          # -C to change into GITHUB_WORKSPACE and archive content; tar written to TMPDIR
           tar --exclude='.git' --exclude='.github' -czf "${TMPDIR}/${TAR_NAME}" -C "${GITHUB_WORKSPACE}" .
+
           if [ ! -f "${TMPDIR}/${TAR_NAME}" ]; then
             echo "ERROR creating tarball"
             exit 1
@@ -93,20 +99,20 @@ jobs:
         run: |
           set -euo pipefail
           ARCHIVE_PATH="${{ steps.make_tar.outputs.archive_path }}"
-          ARCHIVE_NAME="${{ steps.make_tar.outputs.archive_name }}"
-          BUCKET="${{ env.S3_BUCKET }}"
-          PREFIX="${{ env.S3_PREFIX }}"
-          ARCHIVE_KEY="${{ env.ARCHIVE_PREFIX }}/${ARCHIVE_NAME}"
 
-          if [ -z "$BUCKET" ]; then
-            echo "ERROR: S3_BUCKET must be set in repository secrets (secret name S3_BUCKET)."
-            exit 2
+          # compute prefix with fallback in shell (no '||' inside expressions)
+          PREFIX="${{ env.S3_PREFIX }}"
+          if [ -z "$PREFIX" ]; then
+            PREFIX="rcvo-backend"
           fi
+
+          BUCKET="${{ env.S3_BUCKET }}"
+          ARCHIVE_NAME="${{ steps.make_tar.outputs.archive_name }}"
+          ARCHIVE_KEY="${{ env.ARCHIVE_PREFIX }}/${ARCHIVE_NAME}"
 
           echo "Uploading ${ARCHIVE_PATH} to s3://${BUCKET}/${ARCHIVE_KEY} (STANDARD)"
           aws s3 cp "${ARCHIVE_PATH}" "s3://${BUCKET}/${ARCHIVE_KEY}" --storage-class STANDARD --region "${{ env.AWS_REGION }}"
 
-          # verify head-object and return useful info
           OBJ_JSON=$(aws s3api head-object --bucket "$BUCKET" --key "${ARCHIVE_KEY}" --region "${{ env.AWS_REGION }}" --output json)
           echo "s3_head=${OBJ_JSON}" >> $GITHUB_OUTPUT
           echo "s3_key=${ARCHIVE_KEY}" >> $GITHUB_OUTPUT
@@ -118,7 +124,6 @@ jobs:
           BUCKET="${{ env.S3_BUCKET }}"
           S3_KEY="${{ steps.upload_s3.outputs.s3_key }}"
           APP_NAME="${{ env.EB_APP_NAME }}"
-          # version label: unique and readable
           VERSION_LABEL="gh-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           if [ -z "$APP_NAME" ]; then
@@ -144,8 +149,6 @@ jobs:
           VERSION_LABEL="${{ steps.create_app_version.outputs.version_label }}"
           REGION="${{ env.AWS_REGION }}"
 
-          # poll until the application version appears in describe-application-versions
-          echo "Waiting for application version ${VERSION_LABEL} to be visible..."
           for i in $(seq 1 30); do
             OUT=$(aws elasticbeanstalk describe-application-versions \
               --application-name "$APP_NAME" \
@@ -198,7 +201,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          TMPDIR="${{ steps.make_tar.outputs.tmpdir || '' }}"
+          TMPDIR="${{ steps.make_tar.outputs.tmpdir }}"
           if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
             echo "Cleaning tmpdir $TMPDIR"
             rm -rf "$TMPDIR"
