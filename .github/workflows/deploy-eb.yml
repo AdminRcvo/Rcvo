@@ -15,7 +15,6 @@ jobs:
       run:
         shell: bash
 
-    # job-level environment variables (pulled from repo Secrets)
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -40,7 +39,6 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq
 
-      # Detect UI folder presence and publish an output
       - id: detect_ui
         name: Detect UI presence (./ui/package.json)
         run: |
@@ -65,13 +63,11 @@ jobs:
           npm run build --if-present
           cd -
 
-      # Create tarball in a temp dir (safe, avoids same-file mv)
       - id: make_tar
         name: Create stable snapshot tarball (safe, in temp dir)
         run: |
           set -euo pipefail
 
-          # validate required EB secrets exist (explicit error)
           if [ -z "${EB_APP_NAME:-}" ] || [ -z "${EB_ENV_NAME:-}" ]; then
             echo "ERROR: EB_APP_NAME and EB_ENV_NAME must be set in repository Secrets."
             exit 2
@@ -85,10 +81,8 @@ jobs:
           ARCHIVE_PATH="${TMPDIR}/${ARCHIVE_NAME}"
 
           echo "Creating archive at ${ARCHIVE_PATH} (excluded: .git, node_modules, ui/node_modules)"
-          # from repo root, exclude common big dirs
           tar --exclude='.git' --exclude='node_modules' --exclude='ui/node_modules' -czf "${ARCHIVE_PATH}" .
 
-          # export outputs
           echo "archive_path=${ARCHIVE_PATH}" >> "$GITHUB_OUTPUT"
           echo "archive_name=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
 
@@ -105,21 +99,39 @@ jobs:
           S3_KEY="archive/${ARCHIVE_NAME}"
 
           echo "Uploading ${ARCHIVE_PATH} to s3://${S3_BUCKET}/${S3_KEY} (STANDARD)"
-          # use --only-show-errors to reduce noisy progress; aws cli still prints progress to stderr in some environments
           aws s3 cp "${ARCHIVE_PATH}" "s3://${S3_BUCKET}/${S3_KEY}" --storage-class STANDARD --only-show-errors
 
-          # get StorageClass robustly (if missing/empty, treat as STANDARD)
+          # give S3 a moment to reflect metadata
+          sleep 2
+
+          # head-object returns 'None' (string) when StorageClass is absent -> treat as STANDARD
           SC=$(aws s3api head-object --bucket "${S3_BUCKET}" --key "${S3_KEY}" --query 'StorageClass' --output text 2>/dev/null || echo "")
           echo "StorageClass for s3://${S3_BUCKET}/${S3_KEY} => '${SC}'"
 
-          if [ -z "${SC}" ] || [ "${SC}" = "STANDARD" ]; then
+          if [ -z "${SC}" ] || [ "${SC}" = "None" ] || [ "${SC}" = "STANDARD" ]; then
             echo "StorageClass OK (interpreted as STANDARD)."
           else
-            echo "ERROR: uploaded object storage class is not STANDARD (found: ${SC})"
-            exit 3
+            echo "WARN: uploaded object storage class is '${SC}' (expected STANDARD). Attempting to convert to STANDARD via server-side copy..."
+            aws s3api copy-object \
+              --bucket "${S3_BUCKET}" \
+              --copy-source "${S3_BUCKET}/${S3_KEY}" \
+              --key "${S3_KEY}" \
+              --storage-class STANDARD \
+              --metadata-directive COPY \
+              --region "${AWS_REGION}"
+
+            sleep 2
+            SC2=$(aws s3api head-object --bucket "${S3_BUCKET}" --key "${S3_KEY}" --query 'StorageClass' --output text 2>/dev/null || echo "")
+            echo "After copy, StorageClass => '${SC2}'"
+
+            if [ -z "${SC2}" ] || [ "${SC2}" = "None" ] || [ "${SC2}" = "STANDARD" ]; then
+              echo "Conversion to STANDARD confirmed (or StorageClass absent which we treat as STANDARD)."
+            else
+              echo "ERROR: uploaded object storage class is not STANDARD (found: ${SC2})."
+              exit 3
+            fi
           fi
 
-          # export outputs
           echo "s3_key=${S3_KEY}" >> "$GITHUB_OUTPUT"
           echo "s3_bucket=${S3_BUCKET}" >> "$GITHUB_OUTPUT"
 
@@ -127,8 +139,6 @@ jobs:
         name: Create EB application version
         env:
           EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
-          ARCHIVE_S3_KEY: ${{ steps.upload_s3.outputs.s3_key }}
-          ARCHIVE_S3_BUCKET: ${{ steps.upload_s3.outputs.s3_bucket }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
@@ -138,6 +148,9 @@ jobs:
             echo "ERROR: EB_APP_NAME not set (Secrets)."
             exit 4
           fi
+
+          ARCHIVE_S3_KEY="${{ steps.upload_s3.outputs.s3_key }}"
+          ARCHIVE_S3_BUCKET="${{ steps.upload_s3.outputs.s3_bucket }}"
 
           VERSION_LABEL="deploy-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_NUMBER:-0}-$(echo ${GITHUB_SHA:-unknown} | cut -c1-8)"
           echo "Creating application version '${VERSION_LABEL}' for app '${APP}' from s3://${ARCHIVE_S3_BUCKET}/${ARCHIVE_S3_KEY}"
