@@ -1,8 +1,9 @@
+# .github/workflows/deploy-eb.yml
 name: Deploy to Elastic Beanstalk
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -16,10 +17,14 @@ jobs:
         shell: bash
 
     env:
+      # required AWS / S3 secrets (set these in repository Secrets)
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      # EB app/env must be set as secrets in the repository
+      EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
+      EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}
 
     steps:
       - name: Checkout code
@@ -32,14 +37,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Install jq (for debugging / optional)
+      - name: Install jq (optional, used for debug)
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
 
-      # -----------------------------
-      # Detect UI presence (. /ui/package.json)
-      # -----------------------------
+      # Detect UI folder presence and publish an output
       - id: detect_ui
         name: Detect UI presence (./ui/package.json)
         run: |
@@ -49,10 +52,7 @@ jobs:
             echo "ui_present=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # -----------------------------
-      # Setup node (only if UI present)
-      # -----------------------------
-      - name: Setup Node.js (if UI present)
+      - name: Setup Node (if UI present)
         if: ${{ steps.detect_ui.outputs.ui_present == 'true' }}
         uses: actions/setup-node@v4
         with:
@@ -63,21 +63,18 @@ jobs:
         run: |
           cd ui
           npm ci
-          # adapt your build command if needed:
-          npm run build --if-present
+          npm run build --if-present || true
           cd -
 
-      # -----------------------------
-      # Create stable snapshot tarball (in temp dir)
-      # -----------------------------
+      # Create tarball in a temp dir (safe, avoids same-file mv)
       - id: make_tar
         name: Create stable snapshot tarball (safe, in temp dir)
         run: |
           set -euo pipefail
 
-          # require EB secrets exist (clear error if not)
-          if [ -z "${{ secrets.EB_APP_NAME }}" ] || [ -z "${{ secrets.EB_ENV_NAME }}" ]; then
-            echo "ERROR: EB_APP_NAME and EB_ENV_NAME must be set in repository Secrets."
+          # validate required EB secrets exist (explicit error)
+          if [ -z "${EB_APP_NAME:-}" ] || [ -z "${EB_ENV_NAME:-}" ]; then
+            echo "ERROR: EB_APP_NAME and EB_ENV_NAME must be set as repository Secrets."
             exit 2
           fi
 
@@ -88,22 +85,18 @@ jobs:
           TMPDIR=$(mktemp -d)
           ARCHIVE_PATH="${TMPDIR}/${ARCHIVE_NAME}"
 
-          echo "Creating archive: ${ARCHIVE_PATH}"
-
-          # change to repo root and create tar excluding .git and node_modules (adjust excludes if necessary)
-          # we use -C . . so tar content root is repo root
+          echo "Creating archive at ${ARCHIVE_PATH} (excluded: .git, node_modules, ui/node_modules)"
           tar --exclude='.git' --exclude='node_modules' --exclude='ui/node_modules' -czf "${ARCHIVE_PATH}" .
 
+          # export outputs for later steps
           echo "archive_path=${ARCHIVE_PATH}" >> "$GITHUB_OUTPUT"
           echo "archive_name=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
 
-      # -----------------------------
-      # Upload to S3 and confirm STANDARD
-      # -----------------------------
       - id: upload_s3
         name: Upload tarball to S3 (STANDARD) and confirm storage class
         env:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
           ARCHIVE_PATH="${{ steps.make_tar.outputs.archive_path }}"
@@ -113,37 +106,35 @@ jobs:
           echo "Uploading ${ARCHIVE_PATH} to s3://${S3_BUCKET}/${S3_KEY} (STANDARD)"
           aws s3 cp "${ARCHIVE_PATH}" "s3://${S3_BUCKET}/${S3_KEY}" --storage-class STANDARD --only-show-errors
 
-          # verify storage class (text output to avoid jq parsing issues)
-          SC=$(aws s3api head-object --bucket "${S3_BUCKET}" --key "${S3_KEY}" --query 'StorageClass' --output text)
+          # verify StorageClass (fallback to STANDARD if head-object fails)
+          SC=$(aws s3api head-object --bucket "${S3_BUCKET}" --key "${S3_KEY}" --query 'StorageClass' --output text 2>/dev/null || echo "STANDARD")
           echo "StorageClass for s3://${S3_BUCKET}/${S3_KEY} => ${SC}"
           if [ "${SC}" != "STANDARD" ]; then
             echo "ERROR: uploaded object storage class is not STANDARD (found: ${SC})"
             exit 3
           fi
 
+          # expose values for following steps
           echo "s3_key=${S3_KEY}" >> "$GITHUB_OUTPUT"
           echo "s3_bucket=${S3_BUCKET}" >> "$GITHUB_OUTPUT"
 
-      # -----------------------------
-      # Create EB application version
-      # -----------------------------
       - id: create_app_version
         name: Create EB application version
         env:
           EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
           ARCHIVE_S3_KEY: ${{ steps.upload_s3.outputs.s3_key }}
           ARCHIVE_S3_BUCKET: ${{ steps.upload_s3.outputs.s3_bucket }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
-
           APP="${EB_APP_NAME}"
           if [ -z "${APP}" ]; then
             echo "ERROR: EB_APP_NAME not set (Secrets)."
             exit 4
           fi
 
-          # create a clean version label
           VERSION_LABEL="deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}-$(echo ${GITHUB_SHA} | cut -c1-8)"
+
           echo "Creating application version '${VERSION_LABEL}' for app '${APP}' from s3://${ARCHIVE_S3_BUCKET}/${ARCHIVE_S3_KEY}"
 
           aws elasticbeanstalk create-application-version \
@@ -158,13 +149,11 @@ jobs:
 
           echo "version_label=${VERSION_LABEL}" >> "$GITHUB_OUTPUT"
 
-      # -----------------------------
-      # Wait for application version visible (short loop)
-      # -----------------------------
       - id: wait_version
         name: Wait for application version visible
         env:
           APP: ${{ secrets.EB_APP_NAME }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
           VERSION="${{ steps.create_app_version.outputs.version_label }}"
@@ -176,7 +165,7 @@ jobs:
               --application-name "${APP}" \
               --version-labels "${VERSION}" \
               --region "${AWS_REGION}" \
-              --query 'ApplicationVersions[0].VersionLabel' --output text || echo "")
+              --query 'ApplicationVersions[0].VersionLabel' --output text 2>/dev/null || echo "")
             if [ "${FOUND}" = "${VERSION}" ]; then
               echo "Application version visible."
               exit 0
@@ -188,14 +177,11 @@ jobs:
           echo "ERROR: application version did not appear in time."
           exit 6
 
-      # -----------------------------
-      # Deploy new version to EB environment
-      # -----------------------------
       - id: update_env
         name: Deploy new version to EB environment
         env:
           EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}
-          EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
           ENVNAME="${EB_ENV_NAME}"
@@ -211,9 +197,6 @@ jobs:
             --version-label "${VERSION}" \
             --region "${AWS_REGION}"
 
-      # -----------------------------
-      # (best-effort) Cleanup TMP
-      # -----------------------------
       - name: Cleanup TMP (best-effort)
         if: always()
         run: |
