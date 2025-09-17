@@ -12,6 +12,10 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,7 +30,7 @@ jobs:
       - name: Setup Node.js (for frontend build if present)
         uses: actions/setup-node@v4
         with:
-          node-version: '18' # safe default; change if needed
+          node-version: '18'
 
       - name: Build frontend (if ui exists)
         run: |
@@ -40,18 +44,21 @@ jobs:
           else
             echo "No ui folder or no package.json — skipping frontend build"
           fi
-        shell: bash
 
       - name: Create dereferenced tarball (stable snapshot)
         run: |
           set -euo pipefail
+
           TS=$(date +%Y%m%d-%H%M%S)
           OUT="rcvo-deploy-${TS}.tar.gz"
           echo "Creating stable snapshot for $OUT"
+
+          # Create a temporary snapshot dir and dereference symlinks into it
           TMP_DIR=$(mktemp -d)
           echo "tmp: $TMP_DIR"
 
-          # rsync the repo into tmp, -a = archive, -L = dereference symlinks
+          # rsync -aL will copy files and dereference symlinks (-L).
+          # Exclude heavy or unnecessary dirs/files (adjust if needed).
           rsync -aL --delete \
             --exclude='.git' \
             --exclude='node_modules' \
@@ -61,72 +68,20 @@ jobs:
             --exclude='.venv' \
             ./ "$TMP_DIR/"
 
-          # create tarball from the snapshot
-          tar -C "$TMP_DIR" --warning=no-file-changed -czf "$OUT" .
-          mv "$OUT" "$GITHUB_WORKSPACE/"
-          echo "TARBALL=$OUT" >> $GITHUB_ENV
+          # create tarball inside TMP_DIR (prevents "file changed as we read it")
+          OUTPATH="$TMP_DIR/$OUT"
+          tar -C "$TMP_DIR" --warning=no-file-changed -czf "$OUTPATH" .
+
+          # sanity check then move to workspace
+          if [ ! -f "$OUTPATH" ]; then
+            echo "ERROR: tarball not created at $OUTPATH" >&2
+            exit 1
+          fi
+
+          mv "$OUTPATH" "$GITHUB_WORKSPACE/$OUT"
+
+          # export for following steps
+          echo "TARBALL=$OUT" >> "$GITHUB_ENV"
+
+          # cleanup
           rm -rf "$TMP_DIR"
-        shell: bash
-
-      - name: Upload tarball to S3 and verify STANDARD storage class
-        env:
-          BUCKET: ${{ secrets.S3_BUCKET }}
-          REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          set -euo pipefail
-          if [ -z "${TARBALL:-}" ]; then
-            echo "ERROR: TARBALL variable not set" >&2
-            exit 1
-          fi
-          OUT="$TARBALL"
-          S3_KEY="rcvo-backend/$OUT"
-          echo "Uploading $OUT -> s3://$BUCKET/$S3_KEY (STANDARD)"
-          aws s3 cp "$OUT" "s3://$BUCKET/$S3_KEY" --storage-class STANDARD --region "$REGION" --no-progress
-
-          # verify storage class
-          SC=$(aws s3api head-object --bucket "$BUCKET" --key "$S3_KEY" --region "$REGION" --query 'StorageClass' --output text 2>/dev/null || echo "null")
-          if [ -z "$SC" ] || [ "$SC" = "None" ] || [ "$SC" = "null" ]; then SC="STANDARD"; fi
-          if [ "$SC" != "STANDARD" ]; then
-            echo "ERROR: uploaded object storage class is NOT STANDARD (detected: $SC)" >&2
-            exit 1
-          fi
-          echo "OK: S3 object is STANDARD: s3://$BUCKET/$S3_KEY"
-          echo "S3_KEY=$S3_KEY" >> $GITHUB_ENV
-        shell: bash
-
-      - name: Create EB application version
-        env:
-          APP: ${{ secrets.EB_APP_NAME }}
-          BUCKET: ${{ secrets.S3_BUCKET }}
-          REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          set -euo pipefail
-          if [ -z "${S3_KEY:-}" ]; then
-            echo "ERROR: S3_KEY not set" >&2
-            exit 1
-          fi
-          TS=$(date +%Y%m%d-%H%M%S)
-          VERSION_LABEL="gha-${TS}"
-          echo "Creating ApplicationVersion $VERSION_LABEL pointing to s3://$BUCKET/$S3_KEY"
-          aws elasticbeanstalk create-application-version \
-            --application-name "$APP" \
-            --version-label "$VERSION_LABEL" \
-            --source-bundle S3Bucket="$BUCKET",S3Key="$S3_KEY" \
-            --region "$REGION"
-          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
-        shell: bash
-
-      - name: Deploy to EB environment
-        env:
-          ENV: ${{ secrets.EB_ENV_NAME }}
-          REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          set -euo pipefail
-          if [ -z "${VERSION_LABEL:-}" ]; then
-            echo "ERROR: VERSION_LABEL not set" >&2
-            exit 1
-          fi
-          echo "Requesting update-environment -> $ENV (version: $VERSION_LABEL)"
-          aws elasticbeanstalk update-environment --environment-name "$ENV" --version-label "$VERSION_LABEL" --region "$REGION"
-          echo "Deploy requested: $VERSION_LABEL"
-        shell: bash
