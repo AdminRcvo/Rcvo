@@ -9,12 +9,13 @@ permissions:
 
 env:
   AWS_REGION: eu-west-3
+  ENV_NAME: Rcvo-UI-prod
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Configure AWS creds (OIDC)
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
@@ -23,9 +24,19 @@ jobs:
       - name: Who am I?
         run: aws sts get-caller-identity
 
-      - name: EB ping
+      - name: Describe EB environments
         run: |
           aws elasticbeanstalk describe-environments \
             --region "$AWS_REGION" \
             --query 'Environments[].[ApplicationName,EnvironmentName,Health,Status]' \
             --output table
+
+      - name: Health check Rcvo-UI-prod
+        run: |
+          cname=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$ENV_NAME" \
+            --query 'Environments[0].CNAME' \
+            --output text)
+          url="http://$cname/health"
+          echo "Testing $url"
+          curl -sS -o /dev/null -w "HTTP %{http_code}\n" "$url"
