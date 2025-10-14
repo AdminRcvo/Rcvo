@@ -3,25 +3,22 @@ name: Rcvo – OIDC Ops Toolbox
 on:
   workflow_dispatch:
     inputs:
-      env:
-        description: "Environment"
+      cible:
+        description: "Env EB"
         required: true
-        default: "staging"
         type: choice
-        options: [staging, prod]
+        options: [rcvo-backend-b, Rcvo-Backend-staging, Rcvo-UI-prod]
+        default: rcvo-backend-b
       action:
         description: "Action"
         required: true
         type: choice
-        options: [get-health, restart-app, tail-logs, fetch-eb-logs, set-env, unset-env, deploy-version]
+        options: [get-health, restart, tail-eb, set-env, unset-env]
       key:
-        description: "Env var key (set/unset-env)"
+        description: "Clé (set/unset-env)"
         required: false
       value:
-        description: "Env var value (set-env)"
-        required: false
-      version_label:
-        description: "EB version label (deploy-version)"
+        description: "Valeur (set-env)"
         required: false
 
 permissions:
@@ -30,91 +27,54 @@ permissions:
 
 env:
   AWS_REGION: eu-west-3
-  APP_NAME: rcvo-backend
-  STAGING_ENV: Rcvo-Backend-staging
-  PROD_ENV: Rcvo-Backend-prod
-  BASE_SCHEME: http
   HEALTH_PATH: /health
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Configure AWS credentials (OIDC)
+      - name: AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Resolve environment name
-        id: envname
-        run: |
-          if [ "${{ inputs.env }}" = "prod" ]; then
-            echo "NAME=${{ env.PROD_ENV }}" >> $GITHUB_OUTPUT
-          else
-            echo "NAME=${{ env.STAGING_ENV }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Execute action
+      - name: Exécuter
         run: |
           set -e
-          ENV_NAME="${{ steps.envname.outputs.NAME }}"
-          ACTION="${{ inputs.action }}"
+          ENV="${{ inputs.cible }}"
+          ACT="${{ inputs.action }}"
+          echo "ENV=$ENV  ACTION=$ACT"
 
-          echo ">> ENV=$ENV_NAME ACTION=$ACTION"
-
-          case "$ACTION" in
+          case "$ACT" in
             get-health)
-              URL="${{ env.BASE_SCHEME }}://$(aws elasticbeanstalk describe-environments --environment-names "$ENV_NAME" --query 'Environments[0].CNAME' --output text)"
-              code=$(curl -sk -o /dev/null -w "%{http_code}" "$URL${{ env.HEALTH_PATH }}")
-              echo "Health URL: $URL${{ env.HEALTH_PATH }}"
-              echo "HTTP code: $code"
-              [ "$code" = "200" ] || exit 1
+              read -r CNAME URL <<<"$(aws elasticbeanstalk describe-environments \
+                --environment-names "$ENV" \
+                --query 'Environments[0].[CNAME,EndpointURL]' --output text)"
+              PROTO="http"; [[ "$ENV" == *"UI"* ]] && PROTO="https"
+              HCODE=$(curl -sk -o /dev/null -w "%{http_code}" "$PROTO://$CNAME${HEALTH_PATH}")
+              echo "CNAME=$CNAME  HEALTH=$HCODE"
+              [ "$HCODE" = "200" ] || exit 1
               ;;
-
-            restart-app)
-              aws elasticbeanstalk restart-app-server --environment-name "$ENV_NAME"
-              echo "Restart requested."
+            restart)
+              aws elasticbeanstalk restart-app-server --environment-name "$ENV"
+              echo "Restart demandé."
               ;;
-
-            tail-logs)
-              # CloudWatch Logs lecture (si activé sur la plateforme)
-              echo "Listing CW log groups (best effort):"
-              aws logs describe-log-groups --query 'logGroups[].logGroupName' --output table || true
+            tail-eb)
+              aws elasticbeanstalk request-environment-info --environment-name "$ENV" --info-type tail
+              sleep 12
+              URL=$(aws elasticbeanstalk retrieve-environment-info --environment-name "$ENV" --info-type tail --query 'EnvironmentInfo[-1].Message' --output text)
+              echo "Logs: $URL"
               ;;
-
-            fetch-eb-logs)
-              aws elasticbeanstalk request-environment-info --environment-name "$ENV_NAME" --info-type tail
-              echo "Waiting EB to prepare logs…"
-              sleep 15
-              URL=$(aws elasticbeanstalk retrieve-environment-info --environment-name "$ENV_NAME" --info-type tail --query 'EnvironmentInfo[-1].Message' --output text)
-              echo "EB logs bundle: $URL"
-              curl -fSL "$URL" -o eb-logs.zip
-              echo "Saved to eb-logs.zip"
-              ;;
-
             set-env)
               [ -n "${{ inputs.key }}" ] || { echo "key required"; exit 2; }
-              aws elasticbeanstalk update-environment \
-                --environment-name "$ENV_NAME" \
+              aws elasticbeanstalk update-environment --environment-name "$ENV" \
                 --option-settings "Namespace=aws:elasticbeanstalk:application:environment,OptionName=${{ inputs.key }},Value=${{ inputs.value }}"
               ;;
-
             unset-env)
               [ -n "${{ inputs.key }}" ] || { echo "key required"; exit 2; }
-              aws elasticbeanstalk update-environment \
-                --environment-name "$ENV_NAME" \
+              aws elasticbeanstalk update-environment --environment-name "$ENV" \
                 --options-to-remove "Namespace=aws:elasticbeanstalk:application:environment,OptionName=${{ inputs.key }}"
               ;;
-
-            deploy-version)
-              [ -n "${{ inputs.version_label }}" ] || { echo "version_label required"; exit 2; }
-              aws elasticbeanstalk update-environment \
-                --environment-name "$ENV_NAME" \
-                --version-label "${{ inputs.version_label }}"
-              ;;
-
-            *)
-              echo "Unknown action: $ACTION"; exit 2
-              ;;
+            *) echo "Action inconnue"; exit 2 ;;
           esac
