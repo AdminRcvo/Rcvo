@@ -1,42 +1,19 @@
-name: OIDC Smoke
-
-on:
-  workflow_dispatch:
+name: OIDC smoke test
+on: workflow_dispatch
 
 permissions:
   id-token: write
   contents: read
 
-env:
-  AWS_REGION: eu-west-3
-  ENV_NAME: Rcvo-UI-prod
-
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: eu-west-3
 
-      - name: Who am I?
+      - name: Who am I
         run: aws sts get-caller-identity
-
-      - name: Describe EB environments
-        run: |
-          aws elasticbeanstalk describe-environments \
-            --region "$AWS_REGION" \
-            --query 'Environments[].[ApplicationName,EnvironmentName,Health,Status]' \
-            --output table
-
-      - name: Health check Rcvo-UI-prod
-        run: |
-          cname=$(aws elasticbeanstalk describe-environments \
-            --environment-names "$ENV_NAME" \
-            --query 'Environments[0].CNAME' \
-            --output text)
-          url="http://$cname/health"
-          echo "Testing $url"
-          curl -sS -o /dev/null -w "HTTP %{http_code}\n" "$url"
