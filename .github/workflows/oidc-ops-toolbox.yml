@@ -3,22 +3,25 @@ name: Rcvo – OIDC Ops Toolbox
 on:
   workflow_dispatch:
     inputs:
-      cible:
-        description: "Env EB"
+      env:
+        description: "prod ou staging (pour l'API)"
         required: true
         type: choice
-        options: [rcvo-backend-b, Rcvo-Backend-staging, Rcvo-UI-prod]
-        default: rcvo-backend-b
+        options: [prod, staging]
+        default: prod
       action:
         description: "Action"
         required: true
         type: choice
-        options: [get-health, restart, tail-eb, set-env, unset-env]
+        options: [get-health, restart-app, set-env, unset-env, deploy-version]
       key:
-        description: "Clé (set/unset-env)"
+        description: "(set/unset-env) clé"
         required: false
       value:
-        description: "Valeur (set-env)"
+        description: "(set-env) valeur"
+        required: false
+      version_label:
+        description: "(deploy-version) EB version label"
         required: false
 
 permissions:
@@ -27,54 +30,71 @@ permissions:
 
 env:
   AWS_REGION: eu-west-3
+  APP_NAME: Rcvo-backend
   HEALTH_PATH: /health
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: AWS via OIDC
+      - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Exécuter
+      - name: Resolve EB environment
+        id: env
+        shell: bash
         run: |
-          set -e
-          ENV="${{ inputs.cible }}"
+          set -euo pipefail
+          if [ "${{ inputs.env }}" = "prod" ]; then
+            ENV="rcvo-backend-b"
+          else
+            ENV="Rcvo-Backend-staging"
+          fi
+          echo "name=$ENV" >> "$GITHUB_OUTPUT"
+
+      - name: Exec action
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV_NAME="${{ steps.env.outputs.name }}"
           ACT="${{ inputs.action }}"
-          echo "ENV=$ENV  ACTION=$ACT"
+          echo "ENV=$ENV_NAME ACT=$ACT"
 
           case "$ACT" in
             get-health)
-              read -r CNAME URL <<<"$(aws elasticbeanstalk describe-environments \
-                --environment-names "$ENV" \
-                --query 'Environments[0].[CNAME,EndpointURL]' --output text)"
-              PROTO="http"; [[ "$ENV" == *"UI"* ]] && PROTO="https"
-              HCODE=$(curl -sk -o /dev/null -w "%{http_code}" "$PROTO://$CNAME${HEALTH_PATH}")
-              echo "CNAME=$CNAME  HEALTH=$HCODE"
-              [ "$HCODE" = "200" ] || exit 1
-              ;;
-            restart)
-              aws elasticbeanstalk restart-app-server --environment-name "$ENV"
+              URL="http://$(aws elasticbeanstalk describe-environments \
+                --environment-names "$ENV_NAME" \
+                --query 'Environments[0].CNAME' --output text)"
+              code=$(curl -sS -o /dev/null -w '%{http_code}' "$URL${{ env.HEALTH_PATH }}")
+              echo "GET $URL${{ env.HEALTH_PATH }} -> $code"
+              [ "$code" = "200" ] || exit 1
+            ;;
+            restart-app)
+              aws elasticbeanstalk restart-app-server --environment-name "$ENV_NAME"
               echo "Restart demandé."
-              ;;
-            tail-eb)
-              aws elasticbeanstalk request-environment-info --environment-name "$ENV" --info-type tail
-              sleep 12
-              URL=$(aws elasticbeanstalk retrieve-environment-info --environment-name "$ENV" --info-type tail --query 'EnvironmentInfo[-1].Message' --output text)
-              echo "Logs: $URL"
-              ;;
+            ;;
             set-env)
-              [ -n "${{ inputs.key }}" ] || { echo "key required"; exit 2; }
-              aws elasticbeanstalk update-environment --environment-name "$ENV" \
+              [ -n "${{ inputs.key }}" ] || { echo "key requis"; exit 2; }
+              aws elasticbeanstalk update-environment \
+                --environment-name "$ENV_NAME" \
                 --option-settings "Namespace=aws:elasticbeanstalk:application:environment,OptionName=${{ inputs.key }},Value=${{ inputs.value }}"
-              ;;
+            ;;
             unset-env)
-              [ -n "${{ inputs.key }}" ] || { echo "key required"; exit 2; }
-              aws elasticbeanstalk update-environment --environment-name "$ENV" \
+              [ -n "${{ inputs.key }}" ] || { echo "key requis"; exit 2; }
+              aws elasticbeanstalk update-environment \
+                --environment-name "$ENV_NAME" \
                 --options-to-remove "Namespace=aws:elasticbeanstalk:application:environment,OptionName=${{ inputs.key }}"
-              ;;
-            *) echo "Action inconnue"; exit 2 ;;
+            ;;
+            deploy-version)
+              [ -n "${{ inputs.version_label }}" ] || { echo "version_label requis"; exit 2; }
+              aws elasticbeanstalk update-environment \
+                --environment-name "$ENV_NAME" \
+                --version-label "${{ inputs.version_label }}"
+            ;;
+            *)
+              echo "Action inconnue"; exit 2
+            ;;
           esac
