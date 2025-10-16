@@ -1,0 +1,74 @@
+name: Deploy to Elastic Beanstalk (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Choisir la cible EB"
+        type: choice
+        default: ui-prod
+        options: [ui-prod, api-staging, api-blue]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-3
+  # Mappage APP/ENV existants dans ton compte
+  EB_APP_UI: Rcvo-UI
+  EB_ENV_UI_PROD: Rcvo-UI-prod
+  EB_APP_API: Rcvo-backend
+  EB_ENV_API_STAGING: Rcvo-Backend-staging
+  EB_ENV_API_BLUE: rcvo-backend-b
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Résoudre la cible
+        id: res
+        shell: bash
+        run: |
+          case "${{ github.event.inputs.target }}" in
+            ui-prod)
+              echo "APP=${{ env.EB_APP_UI }}" >> $GITHUB_OUTPUT
+              echo "ENV=${{ env.EB_ENV_UI_PROD }}" >> $GITHUB_OUTPUT
+              ;;
+            api-staging)
+              echo "APP=${{ env.EB_APP_API }}" >> $GITHUB_OUTPUT
+              echo "ENV=${{ env.EB_ENV_API_STAGING }}" >> $GITHUB_OUTPUT
+              ;;
+            api-blue)
+              echo "APP=${{ env.EB_APP_API }}" >> $GITHUB_OUTPUT
+              echo "ENV=${{ env.EB_ENV_API_BLUE }}" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "::error::Cible inconnue"; exit 2
+              ;;
+          esac
+          echo "Cible: APP=$APP ENV=$ENV"
+
+      # Exemple minimal: on (re)publie la même version EB si besoin.
+      # Si tu veux aussi uploader un zip avant, on l’ajoutera, mais ici on corrige d’abord l’erreur d’environnement.
+      - name: Déclencher un update 'no-op'
+        shell: bash
+        run: |
+          LABEL="noop-$(date +%s)"
+          echo "Créer version vide (idempotent): $LABEL"
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ steps.res.outputs.APP }}" \
+            --version-label "$LABEL" \
+            --source-bundle S3Bucket="elasticbeanstalk-${{ env.AWS_REGION }}-$(aws sts get-caller-identity --query Account --output text)",S3Key="noop/blank.zip" \
+            || true
+
+          echo "Basculer l'environnement sur $LABEL (si la version existe déjà, EB l’accepte)"
+          aws elasticbeanstalk update-environment \
+            --environment-name "${{ steps.res.outputs.ENV }}" \
+            --version-label "$LABEL"
