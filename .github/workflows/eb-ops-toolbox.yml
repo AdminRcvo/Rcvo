@@ -1,18 +1,19 @@
-name: EB Ops Toolbox
+name: EB Ops Toolbox (Rcvo)
 
 on:
   workflow_dispatch:
     inputs:
       env_name:
-        description: "EB EnvName (ex: rcvo-backend-b / Rcvo-Backend-staging / Rcvo-UI-prod)"
+        description: "Nom de l'environnement EB (ex: rcvo-backend-b / Rcvo-Backend-staging / Rcvo-UI-prod)"
         required: true
+        default: rcvo-backend-b
       action:
-        description: "Action"
+        description: "Action à exécuter"
         required: true
         type: choice
         options: [get-health, restart-app, fetch-eb-logs]
       health_path:
-        description: "Path santé (get-health)"
+        description: "Chemin healthcheck (si get-health)"
         required: false
         default: "/health"
 
@@ -33,36 +34,47 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Execute
+      - name: Exécuter l'action demandée
         shell: bash
         run: |
           set -euo pipefail
-          ENV_NAME="${{ inputs.env_name }}"
+          ENV="${{ inputs.env_name }}"
           ACTION="${{ inputs.action }}"
           HEALTH="${{ inputs.health_path }}"
 
+          echo "Environnement: $ENV"
+          echo "Action: $ACTION"
+
           case "$ACTION" in
             get-health)
-              URL="http://$(aws elasticbeanstalk describe-environments --environment-names "$ENV_NAME" --query 'Environments[0].EndpointURL' --output text)"
+              URL="http://$(aws elasticbeanstalk describe-environments \
+                --environment-names "$ENV" \
+                --query 'Environments[0].EndpointURL' --output text)"
               echo "Health URL: $URL$HEALTH"
               code=$(curl -sS -o /dev/null -w "%{http_code}" "$URL$HEALTH" || true)
-              echo "HTTP: $code"
+              echo "HTTP $code"
               [ "$code" = "200" ] || exit 1
               ;;
 
             restart-app)
-              aws elasticbeanstalk restart-app-server --environment-name "$ENV_NAME"
-              echo "Restart envoyé."
+              aws elasticbeanstalk restart-app-server --environment-name "$ENV"
+              echo "Redémarrage demandé."
               ;;
 
             fetch-eb-logs)
-              aws elasticbeanstalk request-environment-info --environment-name "$ENV_NAME" --info-type bundle
+              aws elasticbeanstalk request-environment-info \
+                --environment-name "$ENV" --info-type bundle
               sleep 20
-              URL=$(aws elasticbeanstalk retrieve-environment-info --environment-name "$ENV_NAME" --info-type bundle --query 'EnvironmentInfo[-1].Message' --output text)
-              echo "Bundle: $URL"
+              URL=$(aws elasticbeanstalk retrieve-environment-info \
+                --environment-name "$ENV" --info-type bundle \
+                --query 'EnvironmentInfo[-1].Message' --output text)
+              echo "URL logs : $URL"
               curl -fSL "$URL" -o eb-logs.zip
-              echo "eb-logs.zip téléchargé (tu peux le récupérer en artifact dans les logs du job)."
+              echo "📦 Logs téléchargés dans eb-logs.zip"
               ;;
 
-            *) echo "Action inconnue"; exit 2 ;;
+            *)
+              echo "Action inconnue"
+              exit 2
+              ;;
           esac
