@@ -31,11 +31,13 @@ jobs:
 
       # Optionnel : crée une archive du dossier courant (si ton app en a besoin)
       - name: Pack current code
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p bundle
-          tar -czf bundle/app.tar.gz --exclude=.git .
+  shell: bash
+  run: |
+    set -euo pipefail
+    mkdir -p bundle
+    # Empêche d’inclure le dossier où l’archive est créée + le repo .git
+    tar --exclude='./bundle' --exclude='.git' -czf bundle/app.tar.gz .
+
 
       # Crée une version EB idempotente (avec un label unique)
       - name: Create EB application version
