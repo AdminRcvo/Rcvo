@@ -1,85 +1,192 @@
-name: Manual EB Deploy (Rcvo unified)
+name: EB Deploy (manuel)
 
 on:
   workflow_dispatch:
     inputs:
-      environment:
-        description: "Choisis l’environnement Elastic Beanstalk cible"
+      app_name:
+        description: "Nom de l'application Elastic Beanstalk (ex: Rcvo-backend, Rcvo-UI)"
         required: true
-        type: choice
-        options:
-          - Rcvo-UI-prod
-          - Rcvo-Backend-staging
-          - rcvo-backend-b
+        type: string
+      env_name:
+        description: "Nom de l'environnement EB à mettre à jour (ex: rcvo-backend-b, Rcvo-Backend-staging, Rcvo-UI-prod)"
+        required: true
+        type: string
+      region:
+        description: "Région AWS"
+        required: false
+        default: "eu-west-3"
+        type: string
+      s3_key_prefix:
+        description: "Préfixe S3 pour stocker les bundles"
+        required: false
+        default: "archive/rcvo-deploy"
+        type: string
+      health_check_path:
+        description: "Chemin HTTP de healthcheck (laisser vide pour désactiver)"
+        required: false
+        default: "/health"
+        type: string
+      wait_minutes:
+        description: "Temps d'attente max pour Ready/Green (minutes)"
+        required: false
+        default: "15"
+        type: string
 
 permissions:
   id-token: write
   contents: read
 
-env:
-  AWS_REGION: eu-west-3
-
 jobs:
   deploy:
+    name: deploy
     runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ inputs.region }}
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::409818814260:role/github-oidc-rcvo
+          aws-region: ${{ inputs.region }}
+          audience: sts.amazonaws.com
 
+      # On crée un tarball stable (sans lire le fichier en cours d'écriture)
       - name: Pack current code
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p bundle
-          zip -qr bundle/app.zip . -x ".git/*"
+          # Exclure le dépôt git et notre dossier bundle
+          tar --exclude='./bundle' --exclude='.git' -czf bundle/app.tar.gz .
 
-      - name: Identify account
-        id: acct
+      - name: Get AWS account id
+        id: sts
+        shell: bash
         run: |
-          echo "id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Upload to S3
-        id: s3
+      - name: Compute S3 bucket and version label
+        id: meta
+        shell: bash
         env:
-          BUCKET: elasticbeanstalk-${{ env.AWS_REGION }}-${{ steps.acct.outputs.id }}
-          KEY: rcvo/${{ github.run_id }}-${{ github.run_attempt }}.zip
+          S3_PREFIX: ${{ inputs.s3_key_prefix }}
         run: |
-          aws s3 cp bundle/app.zip s3://$BUCKET/$KEY
-          echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
-          echo "key=$KEY" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          # Bucket EB par défaut si non surchargé
+          BUCKET="elasticbeanstalk-${AWS_REGION}-${{ steps.sts.outputs.account_id }}"
+          TS="$(date -u +'%Y%m%d-%H%M%S')"
+          GIT_SHA="${GITHUB_SHA::8}"
+          VERSION_LABEL="deploy-${TS}-${GIT_SHA}"
 
-      - name: Create EB version
-        id: ver
-        env:
-          LABEL: deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          echo "version_label=$VERSION_LABEL" >> "$GITHUB_OUTPUT"
+          echo "s3_key=${S3_PREFIX}/${VERSION_LABEL}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bundle to S3
+        shell: bash
         run: |
+          set -euo pipefail
+          aws s3 cp bundle/app.tar.gz "s3://${{ steps.meta.outputs.bucket }}/${{ steps.meta.outputs.s3_key }}" \
+            --storage-class STANDARD
+
+      - name: Create EB application version
+        shell: bash
+        run: |
+          set -euo pipefail
           aws elasticbeanstalk create-application-version \
-            --application-name Rcvo-backend \
-            --version-label "$LABEL" \
-            --source-bundle S3Bucket=${{ steps.s3.outputs.bucket }},S3Key=${{ steps.s3.outputs.key }}
-          echo "label=$LABEL" >> $GITHUB_OUTPUT
+            --application-name "${{ inputs.app_name }}" \
+            --version-label "${{ steps.meta.outputs.version_label }}" \
+            --source-bundle S3Bucket="${{ steps.meta.outputs.bucket }}",S3Key="${{ steps.meta.outputs.s3_key }}" \
+            --auto-create-application \
+            --region "${AWS_REGION}"
 
-      - name: Update selected environment
+      - name: Update EB environment
+        shell: bash
         run: |
-          echo "Deploying to ${{ github.event.inputs.environment }}"
+          set -euo pipefail
+          echo "Déploiement ${ { steps.meta.outputs.version_label } } -> ${{ inputs.env_name }}"
           aws elasticbeanstalk update-environment \
-            --environment-name "${{ github.event.inputs.environment }}" \
-            --version-label "${{ steps.ver.outputs.label }}"
+            --environment-name "${{ inputs.env_name }}" \
+            --version-label "${{ steps.meta.outputs.version_label }}" \
+            --region "${AWS_REGION}"
 
       - name: Wait until Ready/Green
-        timeout-minutes: 15
+        timeout-minutes: ${{ fromJSON(inputs.wait_minutes) }}
+        shell: bash
         run: |
-          for i in {1..90}; do
-            read -r STATUS HEALTH VERSION <<<"$(aws elasticbeanstalk describe-environments \
-              --environment-names '${{ github.event.inputs.environment }}' \
-              --query 'Environments[0].[Status,Health,VersionLabel]' --output text)"
-            echo " - $STATUS / $HEALTH ($VERSION)"
-            [ "$STATUS" = "Ready" ] && [ "$HEALTH" = "Green" ] && exit 0
+          set -euo pipefail
+          ENV="${{ inputs.env_name }}"
+          REGION="${AWS_REGION}"
+          MAX_MIN=${{ inputs.wait_minutes }}
+
+          echo "Attente de l'état Ready/Green sur ${ENV} (max ${MAX_MIN} min)…"
+          for i in $(seq 1 $((MAX_MIN*6))); do
+            # toutes les 10s
+            OUT="$(aws elasticbeanstalk describe-environments \
+              --environment-names "$ENV" --region "$REGION" \
+              --query 'Environments[0].[Status,Health,HealthStatus,VersionLabel,EndpointURL]' \
+              --output text || true)"
+
+            STATUS="$(echo "$OUT" | awk '{print $1}')"
+            HEALTH="$(echo "$OUT" | awk '{print $2}')"
+            HSTATUS="$(echo "$OUT" | awk '{print $3}')"
+            VER="$(echo "$OUT" | awk '{print $4}')"
+            URL="$(echo "$OUT" | awk '{print $5}')"
+
+            echo "[$(date +%H:%M:%S)] $STATUS / $HEALTH / $HSTATUS (ver=${VER}) url=${URL}"
+
+            if [[ "$STATUS" == "Ready" && "$HSTATUS" == "Green" ]]; then
+              echo "✅ Environnement prêt."
+              exit 0
+            fi
+
+            if [[ "$HSTATUS" == "Severe" || "$HSTATUS" == "Degraded" || "$HEALTH" == "Red" ]]; then
+              echo "❌ Environnement en erreur (Health=$HEALTH / $HSTATUS)."
+              echo "Derniers événements EB :"
+              aws elasticbeanstalk describe-events --environment-name "$ENV" --region "$REGION" \
+                --max-items 20 --output table || true
+              exit 1
+            fi
+
             sleep 10
           done
-          echo "Timeout waiting for Ready/Green"; exit 1
+
+          echo "❌ Timeout d'attente Ready/Green."
+          aws elasticbeanstalk describe-events --environment-name "$ENV" --region "$REGION" \
+            --max-items 20 --output table || true
+          exit 1
+
+      # Healthcheck HTTP optionnel
+      - name: Optional HTTP health check
+        if: ${{ inputs.health_check_path != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV="${{ inputs.env_name }}"
+          REGION="${AWS_REGION}"
+          PATH_HC="${{ inputs.health_check_path }}"
+
+          URL="$(aws elasticbeanstalk describe-environments \
+            --environment-names "$ENV" --region "$REGION" \
+            --query 'Environments[0].EndpointURL' --output text)"
+
+          if [[ "$URL" == "None" || -z "$URL" ]]; then
+            echo "ℹ️ Pas d'URL EB retournée, on saute le healthcheck."
+            exit 0
+          fi
+
+          echo "Healthcheck: http://${URL}${PATH_HC}"
+          code="$(curl -s -o /dev/null -w "%{http_code}" "http://${URL}${PATH_HC}")"
+          echo "HTTP $code"
+          if [[ "$code" != "200" ]]; then
+            echo "❌ Healthcheck HTTP non-200."
+            exit 1
+          fi
+
+          echo "✅ Healthcheck OK."
