@@ -1,10 +1,21 @@
-name: Deploy to Elastic Beanstalk (clone current bundle)
+name: RCVO — Déploiement EB (clone / rollback)
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "clone = nouveau label depuis le bundle actuel | rollback = revenir à la version précédente"
+        required: true
+        default: "clone"
+        type: choice
+        options: [clone, rollback]
+      label_override:
+        description: "Label personnalisé (facultatif, ex: ops-release-20251021-155033)"
+        required: false
+        default: ""
 
 permissions:
-  id-token: write
+  id-token: write     # OIDC → STS
   contents: read
 
 env:
@@ -17,109 +28,94 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ env.ROLE_ARN }}
-          audience: sts.amazonaws.com
-          output-env-credentials: true
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Clone current S3 bundle, create AppVersion and update env
-        id: do-deploy
+      - name: Install AWS CLI + jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y awscli jq
+
+      - name: Déployer (clone du bundle courant)
+        if: inputs.mode == 'clone'
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           REGION="${AWS_REGION}"
           APP="${EB_APP}"
-          ENVN="${EB_ENV}"
+          ENV="${EB_ENV}"
+          BUCKET="${EB_BUCKET}"
 
-          echo "▶︎ Résolution version actuelle…"
-          CUR_LABEL="$(aws elasticbeanstalk describe-environments --region "$REGION" \
-                        --environment-names "$ENVN" --query 'Environments[0].VersionLabel' --output text)"
-          if [[ -z "$CUR_LABEL" || "$CUR_LABEL" == "None" ]]; then
-            echo "Aucune version courante trouvée"; exit 1
-          fi
+          # Récupère la version en place et son bundle S3
+          CUR=$(aws elasticbeanstalk describe-environments --region "$REGION" \
+            --environment-names "$ENV" --query 'Environments[0].VersionLabel' --output text)
+          SRC_KEY=$(aws elasticbeanstalk describe-application-versions --region "$REGION" \
+            --application-name "$APP" --version-labels "$CUR" \
+            --query 'ApplicationVersions[0].SourceBundle.S3Key' --output text)
 
-          read -r SRC_BUCKET SRC_KEY < <(aws elasticbeanstalk describe-application-versions --region "$REGION" \
-            --application-name "$APP" --version-labels "$CUR_LABEL" \
-            --query 'ApplicationVersions[0].[SourceBundle.S3Bucket,SourceBundle.S3Key]' --output text)
+          # Nouveau label
+          LABEL="${{ github.event.inputs.label_override }}"
+          if [ -z "$LABEL" ]; then LABEL="ops-deploy-$(date +%Y%m%d-%H%M%S)-$RANDOM"; fi
+          echo "→ New label: $LABEL (source: s3://$BUCKET/$SRC_KEY)"
 
-          if [[ -z "$SRC_BUCKET" || -z "$SRC_KEY" || "$SRC_BUCKET" == "None" || "$SRC_KEY" == "None" ]]; then
-            echo "SourceBundle introuvable pour $CUR_LABEL"; exit 1
-          fi
-          echo "Source = s3://$SRC_BUCKET/$SRC_KEY"
-
-          NEW_LABEL="ops-deploy-${{ github.run_id }}-${{ github.run_attempt }}"
-          echo "▶︎ CreateApplicationVersion -> $NEW_LABEL"
+          # Crée l'AppVersion (process) + bascule l'environnement
           aws elasticbeanstalk create-application-version --region "$REGION" \
-            --application-name "$APP" --version-label "$NEW_LABEL" \
-            --source-bundle S3Bucket="$SRC_BUCKET",S3Key="$SRC_KEY" --process >/dev/null
+            --application-name "$APP" --version-label "$LABEL" \
+            --source-bundle S3Bucket="$BUCKET",S3Key="$SRC_KEY" --process
 
-          echo "▶︎ UpdateEnvironment -> $NEW_LABEL"
           aws elasticbeanstalk update-environment --region "$REGION" \
-            --environment-name "$ENVN" --version-label "$NEW_LABEL" >/dev/null
+            --environment-name "$ENV" --version-label "$LABEL"
 
-          echo "new_label=$NEW_LABEL" >> "$GITHUB_OUTPUT"
-          echo "cur_label=$CUR_LABEL"  >> "$GITHUB_OUTPUT"
+          # Watch jusqu’à Ready & (Green|Yellow)
+          end=$((SECONDS+1200))
+          while [ $SECONDS -lt $end ]; do
+            read -r S H V < <(aws elasticbeanstalk describe-environments --region "$REGION" \
+              --environment-names "$ENV" --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
+            echo "EB Status=$S Health=$H VersionLabel=$V"
+            if [[ "$S" == "Ready" && "$V" == "$LABEL" && "$H" =~ ^(Green|Yellow)$ ]]; then
+              echo "✅ Déployé: $LABEL ($H)"; exit 0; fi
+            sleep 10
+          done
+          echo "⚠️ Timeout en attente de Ready/Green"; exit 1
 
-      - name: Wait until Ready/(Green|Yellow) (≤10 min) with auto-rollback
-        if: always()
+      - name: Rollback (vers la version précédente)
+        if: inputs.mode == 'rollback'
         shell: bash
-        env:
-          NEW_LABEL: ${{ steps.do-deploy.outputs.new_label }}
-          CUR_LABEL: ${{ steps.do-deploy.outputs.cur_label }}
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           REGION="${AWS_REGION}"
-          ENVN="${EB_ENV}"
-          TARGET="${NEW_LABEL}"
-          PREV="${CUR_LABEL}"
+          APP="${EB_APP}"
+          ENV="${EB_ENV}"
 
-          echo "▶︎ Attente de Ready sur $TARGET (tolère Red transitoire)…"
-          deadline=$(( $(date +%s) + 600 ))
-          last=""
+          CUR=$(aws elasticbeanstalk describe-environments --region "$REGION" \
+            --environment-names "$ENV" --query 'Environments[0].VersionLabel' --output text)
+          PREV=$(aws elasticbeanstalk describe-application-versions --region "$REGION" --application-name "$APP" \
+            --query 'reverse(sort_by(ApplicationVersions,&DateCreated))[*].VersionLabel' --output text \
+            | tr '\t' '\n' | grep -v "^$CUR$" | head -n1)
 
-          while (( $(date +%s) < deadline )); do
-            read -r ST H V < <(aws elasticbeanstalk describe-environments --region "$REGION" \
-              --environment-names "$ENVN" --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
-            echo "Status=$ST Health=$H Version=$V"
-            last="$ST/$H/$V"
-            if [[ "$ST" == "Ready" && "$V" == "$TARGET" && "$H" =~ ^(Green|Yellow)$ ]]; then
-              echo "✅ Déployé OK: $TARGET ($H)"; exit 0
-            fi
-            sleep 8
-          done
+          if [ -z "$PREV" ]; then echo "Aucune version précédente trouvée"; exit 1; fi
+          echo "→ Rollback vers: $PREV"
 
-          echo "❌ Toujours pas Ready/Green/Yellow pour $TARGET (dernier=$last). Rollback…"
           aws elasticbeanstalk update-environment --region "$REGION" \
-            --environment-name "$ENVN" --version-label "$PREV" >/dev/null || true
+            --environment-name "$ENV" --version-label "$PREV"
 
-          echo "▶︎ Attente du rollback (≤5 min)…"
-          deadline=$(( $(date +%s) + 300 ))
-          while (( $(date +%s) < deadline )); do
-            read -r ST H V < <(aws elasticbeanstalk describe-environments --region "$REGION" \
-              --environment-names "$ENVN" --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
-            echo "Status=$ST Health=$H Version=$V"
-            if [[ "$ST" == "Ready" && "$V" == "$PREV" && "$H" =~ ^(Green|Yellow)$ ]]; then
-              echo "↩️ Rollback OK -> $PREV ($H)"; break
-            fi
-            sleep 8
+          end=$((SECONDS+1200))
+          while [ $SECONDS -lt $end ]; do
+            read -r S H V < <(aws elasticbeanstalk describe-environments --region "$REGION" \
+              --environment-names "$ENV" --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
+            echo "EB Status=$S Health=$H VersionLabel=$V"
+            if [[ "$S" == "Ready" && "$V" == "$PREV" && "$H" =~ ^(Green|Yellow)$ ]]; then
+              echo "✅ Rollback OK: $PREV ($H)"; exit 0; fi
+            sleep 10
           done
-
-          echo "▶︎ Events récents :"
-          aws elasticbeanstalk describe-events --region "$REGION" --environment-name "$ENVN" \
-            --start-time "$(date -u -d '20 minutes ago' +%FT%TZ)" \
-            --query 'reverse(Events)[].[EventDate,Severity,Message]' --output table || true
-
-          exit 1
-
-      - name: Post Configure AWS credentials (OIDC)
-        if: always()
-        run: aws sts get-caller-identity --query Arn --output text || true
+          echo "⚠️ Timeout en attente de Ready/Green"; exit 1
