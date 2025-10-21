@@ -1,108 +1,76 @@
-name: EB Deploy
+name: Deploy to Elastic Beanstalk
 
 on:
+  push:
+    branches: [ main ]      # change si besoin
   workflow_dispatch:
 
-permissions:
-  id-token: write
-  contents: read
-
 env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-3' }}
-  APP_NAME: ${{ vars.EB_APP_NAME }}
-  ENV_NAME: ${{ vars.EB_ENV_NAME }}
+  AWS_REGION: eu-west-3
+  APP: Rcvo-backend
+  ENV: rcvo-backend-b
+  BUCKET: elasticbeanstalk-eu-west-3-409818814260
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-to-assume: arn:aws:iam::409818814260:role/GithubDeployRole
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Pack current code (tar.gz stable)
-        shell: bash
+      - name: Tooling
         run: |
-          set -euo pipefail
-          mkdir -p bundle
-          tar --exclude='./bundle' --exclude='.git' -czf bundle/app.tar.gz .
+          sudo apt-get update -y
+          sudo apt-get install -y zip jq
 
-      - name: Get AWS account id
-        id: acct
-        shell: bash
+      - name: Package app
         run: |
-          set -euo pipefail
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+          rm -f app.zip
+          zip -r app.zip . -x ".git/*" ".github/*"
 
-      - name: Compute S3 bucket & version label
-        id: meta
-        shell: bash
+      - name: Upload to S3 (unique key)
+        id: upload
         run: |
-          set -euo pipefail
-          S3_BUCKET="elasticbeanstalk-${AWS_REGION}-${{ steps.acct.outputs.account_id }}"
-          VERSION_LABEL="deploy-$(date +%Y%m%d-%H%M%S)"
-          echo "bucket=$S3_BUCKET" >> "$GITHUB_OUTPUT"
-          echo "version_label=$VERSION_LABEL" >> "$GITHUB_OUTPUT"
+          LABEL="ops-deploy-${{ github.run_id }}-${{ github.run_number }}"
+          S3KEY="${APP}/${LABEL}.zip"
+          aws s3 cp app.zip "s3://${BUCKET}/${S3KEY}"
+          echo "LABEL=$LABEL" >> $GITHUB_OUTPUT
+          echo "S3KEY=$S3KEY" >> $GITHUB_OUTPUT
 
-      - name: Upload to S3
-        shell: bash
+      - name: Create EB Application Version (process)
         run: |
-          set -euo pipefail
-          aws s3 cp bundle/app.tar.gz "s3://${{ steps.meta.outputs.bucket }}/${{ steps.meta.outputs.version_label }}.tar.gz"
-
-      - name: Create EB application version (idempotent)
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "🧩 Création de la version EB ${APP_NAME}/${{ steps.meta.outputs.version_label }}"
           aws elasticbeanstalk create-application-version \
-            --region "${AWS_REGION}" \
-            --application-name "${APP_NAME}" \
-            --version-label "${{ steps.meta.outputs.version_label }}" \
-            --source-bundle S3Bucket="${{ steps.meta.outputs.bucket }}",S3Key="${{ steps.meta.outputs.version_label }}.tar.gz" \
-          || echo "ℹ️ Version déjà existante, on continue"
+            --application-name "${APP}" \
+            --version-label "${{ steps.upload.outputs.LABEL }}" \
+            --source-bundle S3Bucket="${BUCKET}",S3Key="${{ steps.upload.outputs.S3KEY }}" \
+            --process
 
-      - name: Update EB environment
-        shell: bash
+      - name: Update Environment
         run: |
-          set -euo pipefail
-          echo "🚀 Déploiement ${{ steps.meta.outputs.version_label }} -> ${ENV_NAME}"
           aws elasticbeanstalk update-environment \
-            --region "${AWS_REGION}" \
-            --environment-name "${ENV_NAME}" \
-            --version-label "${{ steps.meta.outputs.version_label }}"
+            --environment-name "${ENV}" \
+            --version-label "${{ steps.upload.outputs.LABEL }}"
 
-      - name: Wait Ready/Green
-        shell: bash
+      - name: Wait until Ready/Green (≤15 min)
         run: |
-          set -euo pipefail
-          echo "⏳ Attente du statut 'Ready/Green'..."
-          for i in {1..45}; do
-            STATUS=$(aws elasticbeanstalk describe-environments \
-              --region "${AWS_REGION}" \
-              --environment-names "${ENV_NAME}" \
-              --query "Environments[0].Health" --output text)
-            echo "[$i] Statut : $STATUS"
-            [[ "$STATUS" == "Green" || "$STATUS" == "Ready" ]] && break
-            sleep 20
+          end=$(( $(date +%s) + 900 ))
+          while [ $(date +%s) -lt $end ]; do
+            read -r S H V < <(aws elasticbeanstalk describe-environments \
+              --environment-names "${ENV}" \
+              --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
+            echo "Status=$S Health=$H Version=$V"
+            if [[ "$S" == "Ready" && "$V" == "${{ steps.upload.outputs.LABEL }}" && "$H" =~ ^(Green|Yellow)$ ]]; then
+              echo "✅ Deployed: $V ($H)"; exit 0
+            fi
+            sleep 10
           done
-          echo "✅ Déploiement terminé pour ${ENV_NAME}"
-
-      - name: Optional HTTP health check
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "🌍 Vérification de la disponibilité..."
-          URL=$(aws elasticbeanstalk describe-environments \
-            --region "${AWS_REGION}" \
-            --environment-names "${ENV_NAME}" \
-            --query "Environments[0].EndpointURL" --output text)
-          curl -fsSL "http://${URL}/health" || echo "⚠️ Health check échoué"
-
+          echo "❌ Timeout waiting for Ready/Green"; exit 1
