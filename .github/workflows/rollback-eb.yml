@@ -1,0 +1,73 @@
+name: RCVO — Rollback EB (version précédente)
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "VersionLabel cible (laisser vide = version précédente)"
+        required: false
+        default: ""
+
+permissions:
+  id-token: write   # OIDC pour assumer le rôle
+  contents: read
+
+env:
+  REGION: eu-west-3
+  APP: Rcvo-backend
+  ENV: rcvo-backend-b
+  ROLE_ARN: arn:aws:iam::409818814260:role/GithubDeployRole
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configurer AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Rollback EB
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGION="${REGION}"
+          APP="${APP}"
+          ENV="${ENV}"
+          INPUT_LABEL="${{ github.event.inputs.label }}"
+
+          if [ -n "$INPUT_LABEL" ]; then
+            TARGET="$INPUT_LABEL"
+          else
+            CURRENT=$(aws elasticbeanstalk describe-environments --region "$REGION" \
+                      --environment-names "$ENV" --query 'Environments[0].VersionLabel' --output text)
+            TARGET=$(aws elasticbeanstalk describe-application-versions --region "$REGION" --application-name "$APP" \
+                     --query 'reverse(sort_by(ApplicationVersions,&DateCreated))[*].VersionLabel' --output text \
+                     | tr '\t' '\n' | grep -v "^$CURRENT$" | head -n1)
+            if [ -z "$TARGET" ]; then
+              echo "❌ Aucune version précédente trouvée"; exit 1
+            fi
+          fi
+
+          echo "➡️  Rollback vers: $TARGET"
+          aws elasticbeanstalk update-environment --region "$REGION" \
+            --environment-name "$ENV" --version-label "$TARGET"
+
+          end=$((SECONDS+900))
+          while [ $SECONDS -lt $end ]; do
+            read -r S H V < <(aws elasticbeanstalk describe-environments --region "$REGION" \
+              --environment-names "$ENV" --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
+            echo "Status=$S Health=$H Version=$V"
+            if [[ "$S" == "Ready" && "$V" == "$TARGET" && "$H" =~ ^(Green|Yellow)$ ]]; then
+              echo "✅ Rollback OK: $TARGET ($H)"; exit 0
+            fi
+            sleep 8
+          done
+
+          echo "⚠️ Timeout d'attente Ready/Green"
+          aws elasticbeanstalk describe-events --region "$REGION" --environment-name "$ENV" \
+            --start-time "$(date -u -d '20 minutes ago' +%FT%TZ)" \
+            --query 'reverse(Events)[].[EventDate,Severity,Message]' --output table || true
+          exit 1
