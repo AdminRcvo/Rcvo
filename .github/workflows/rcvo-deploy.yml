@@ -1,0 +1,190 @@
+name: RCVO — Déploiement EB (clone ou build)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Mode de déploiement"
+        type: choice
+        required: true
+        default: clone
+        options:
+          - clone
+          - build
+      label_suffix:
+        description: "Suffixe optionnel du label (ex: hotfix-123)"
+        required: false
+        default: ""
+      build_cmd:
+        description: "(mode=build) Commande build"
+        required: false
+        default: "npm ci && npm run build"
+      zip_path:
+        description: "(mode=build) Chemin à zipper ('.' = repo)"
+        required: false
+        default: "."
+
+permissions:
+  id-token: write     # OIDC pour assumer le rôle
+  contents: read
+
+env:
+  AWS_REGION: eu-west-3
+  EB_APP: Rcvo-backend
+  EB_ENV: rcvo-backend-b
+  EB_BUCKET: elasticbeanstalk-eu-west-3-409818814260
+  ROLE_ARN: arn:aws:iam::409818814260:role/GithubDeployRole
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          role-session-name: rcvo-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Whoami (debug)
+        run: aws sts get-caller-identity
+
+      # ---------- MODE BUILD (optionnel) ----------
+      - name: Setup Node (mode=build)
+        if: ${{ inputs.mode == 'build' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build app (mode=build)
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          set -euo pipefail
+          ${INPUT_BUILD_CMD:-${{ inputs.build_cmd }}}
+
+      - name: Pack & upload to S3 (mode=build)
+        if: ${{ inputs.mode == 'build' }}
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGION="${AWS_REGION}"
+          BUCKET="${EB_BUCKET}"
+          APP="${EB_APP}"
+
+          TS=$(date +%Y%m%d-%H%M%S)
+          SUF="${{ inputs.label_suffix }}"
+          LABEL="ops-deploy-${TS}"
+          if [ -n "$SUF" ]; then LABEL="${LABEL}-${SUF}"; fi
+
+          ZIP="/tmp/${LABEL}.zip"
+          SRC="${{ inputs.zip_path }}"
+          echo "→ ZIP $SRC -> $ZIP"
+          (cd "$SRC" && zip -qry "$ZIP" . -x ".git/*" ".github/*")
+
+          # clé S3 "propre" pour EB
+          KEY="${APP}/${LABEL}.zip"
+          aws s3 cp "$ZIP" "s3://${BUCKET}/${KEY}" \
+            --no-progress
+
+          echo "LABEL=$LABEL" >> $GITHUB_OUTPUT
+          echo "S3KEY=$KEY" >> $GITHUB_OUTPUT
+
+      # ---------- MODE CLONE (par défaut) ----------
+      - name: Préparer label + source (mode=clone)
+        if: ${{ inputs.mode == 'clone' }}
+        id: clone_src
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGION="${AWS_REGION}"
+          APP="${EB_APP}"
+          ENV="${EB_ENV}"
+          BUCKET="${EB_BUCKET}"
+
+          CUR=$(aws elasticbeanstalk describe-environments --region "$REGION" \
+            --environment-names "$ENV" --query 'Environments[0].VersionLabel' --output text)
+          KEY=$(aws elasticbeanstalk describe-application-versions --region "$REGION" \
+            --application-name "$APP" --version-labels "$CUR" \
+            --query 'ApplicationVersions[0].SourceBundle.S3Key' --output text)
+
+          TS=$(date +%Y%m%d-%H%M%S)
+          SUF="${{ inputs.label_suffix }}"
+          LABEL="ops-deploy-${TS}"
+          if [ -n "$SUF" ]; then LABEL="${LABEL}-${SUF}"; fi
+
+          echo "LABEL=$LABEL" >> $GITHUB_OUTPUT
+          echo "S3KEY=$KEY" >> $GITHUB_OUTPUT
+          echo "Source: s3://${BUCKET}/${KEY}"
+
+      # ---------- CREATE APP VERSION ----------
+      - name: EB CreateApplicationVersion
+        id: cav
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGION="${AWS_REGION}"
+          APP="${EB_APP}"
+          BUCKET="${EB_BUCKET}"
+
+          if [ "${{ inputs.mode }}" = "build" ]; then
+            LABEL="${{ steps.pack.outputs.LABEL }}"
+            KEY="${{ steps.pack.outputs.S3KEY }}"
+          else
+            LABEL="${{ steps.clone_src.outputs.LABEL }}"
+            KEY="${{ steps.clone_src.outputs.S3KEY }}"
+          fi
+
+          echo "LABEL=$LABEL" >> $GITHUB_OUTPUT
+
+          aws elasticbeanstalk create-application-version --region "$REGION" \
+            --application-name "$APP" --version-label "$LABEL" \
+            --source-bundle S3Bucket="$BUCKET",S3Key="$KEY" --process
+
+      # ---------- UPDATE ENV ----------
+      - name: EB UpdateEnvironment
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGION="${AWS_REGION}"
+          ENV="${EB_ENV}"
+          LABEL="${{ steps.cav.outputs.LABEL }}"
+
+          aws elasticbeanstalk update-environment --region "$REGION" \
+            --environment-name "$ENV" --version-label "$LABEL"
+
+      # ---------- WAIT READY ----------
+      - name: Attendre READY (<=15 min)
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGION="${AWS_REGION}"
+          ENV="${EB_ENV}"
+          LABEL="${{ steps.cav.outputs.LABEL }}"
+          end=$((SECONDS+900))
+          while [ $SECONDS -lt $end ]; do
+            read -r S H V < <(aws elasticbeanstalk describe-environments --region "$REGION" \
+              --environment-names "$ENV" --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
+            echo "$(date -Is) Status=$S Health=$H Version=$V"
+            if [[ "$S" == "Ready" && "$V" == "$LABEL" && "$H" =~ ^(Green|Yellow)$ ]]; then
+              echo "✅ Déployé: $LABEL ($H)"
+              exit 0
+            fi
+            sleep 8
+          done
+          echo "❌ Timeout d'attente Ready/Green"
+          exit 1
+
+      # ---------- DIAG EN CAS D'ÉCHEC ----------
+      - name: Events EB (diag)
+        if: failure()
+        run: |
+          REGION="${AWS_REGION}"
+          ENV="${EB_ENV}"
+          aws elasticbeanstalk describe-events --region "$REGION" --environment-name "$ENV" \
+            --start-time "$(date -u -d '30 minutes ago' +%FT%TZ)" \
+            --query 'reverse(Events)[].[EventDate,Severity,Message]' --output table || true
