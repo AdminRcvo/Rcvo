@@ -1,29 +1,24 @@
-name: Deploy to Elastic Beanstalk
+name: Deploy to Elastic Beanstalk (clone current bundle)
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
-  workflow_dispatch:
 
 permissions:
-  id-token: write     # OIDC
+  id-token: write
   contents: read
 
 env:
   AWS_REGION: eu-west-3
-  EB_APP: Rcvo-backend
-  EB_ENV: rcvo-backend-b
-  EB_BUCKET: elasticbeanstalk-eu-west-3-409818814260
+  APP: Rcvo-backend
+  ENV: rcvo-backend-b
   ROLE_ARN: arn:aws:iam::409818814260:role/GithubDeployRole
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -32,49 +27,49 @@ jobs:
           audience: sts.amazonaws.com
           output-env-credentials: true
 
-      - name: Tooling
+      - name: Résoudre le bundle S3 actuellement en prod
+        id: cur
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq zip
-
-      - name: Package app (zip)
-        run: |
-          zip -r app.zip . -x ".git/*" ".github/*" "node_modules/*"
-
-      - name: Upload to S3 (unique key)
-        run: |
-          KEY="${EB_APP}/ops-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zip"
-          echo "S3_KEY=$KEY" >> $GITHUB_ENV
-          aws s3 cp app.zip "s3://${EB_BUCKET}/${KEY}"
-
-      - name: Create EB Application Version (process) — always unique
-        run: |
+          CUR=$(aws elasticbeanstalk describe-environments \
+                  --environment-names "$ENV" \
+                  --query 'Environments[0].VersionLabel' --output text)
+          read -r S3B S3K < <(aws elasticbeanstalk describe-application-versions \
+                  --application-name "$APP" --version-labels "$CUR" \
+                  --query 'ApplicationVersions[0].[SourceBundle.S3Bucket,SourceBundle.S3Key]' --output text)
           LABEL="ops-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "LABEL=$LABEL" >> $GITHUB_ENV
+          echo "S3_BUCKET=$S3B" >> $GITHUB_ENV
+          echo "S3_KEY=$S3K" >> $GITHUB_ENV
+          echo "Current=$CUR  ->  New=$LABEL  (s3://$S3B/$S3K)"
+
+      - name: Create EB Application Version (process)
+        run: |
           aws elasticbeanstalk create-application-version \
-            --application-name "$EB_APP" \
+            --application-name "$APP" \
             --version-label "$LABEL" \
-            --source-bundle S3Bucket="$EB_BUCKET",S3Key="$S3_KEY" \
+            --source-bundle S3Bucket="$S3_BUCKET",S3Key="$S3_KEY" \
             --process
 
       - name: Update Environment
         run: |
           aws elasticbeanstalk update-environment \
-            --environment-name "$EB_ENV" \
-            --version-label "$LABEL"
+            --environment-name "$ENV" --version-label "$LABEL"
 
-      - name: Wait until Ready/Green (≤15 min)
-        timeout-minutes: 16
+      - name: Wait until Ready/(Green|Yellow) (≤10 min)
+        timeout-minutes: 11
         run: |
-          end=$((SECONDS+900))
+          end=$((SECONDS+600))
           while [ $SECONDS -lt $end ]; do
             read -r S H V < <(aws elasticbeanstalk describe-environments \
-              --environment-names "$EB_ENV" \
-              --query 'Environments[0].[Status,Health,VersionLabel]' \
-              --output text)
+              --environment-names "$ENV" \
+              --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
             echo "Status=$S Health=$H Version=$V"
             if [[ "$S" == "Ready" && "$V" == "$LABEL" && "$H" =~ ^(Green|Yellow)$ ]]; then
               echo "✅ Déployé: $LABEL ($H)"; exit 0
+            fi
+            # Si c'est rouge, on ne poireaute pas 15 min
+            if [[ "$H" == "Red" ]]; then
+              echo "❌ Health=Red sur $V. Abandon."; exit 1
             fi
             sleep 10
           done
@@ -84,7 +79,7 @@ jobs:
         if: failure()
         run: |
           aws elasticbeanstalk describe-events \
-            --environment-name "$EB_ENV" \
+            --environment-name "$ENV" \
             --start-time "$(date -u -d '30 minutes ago' +%FT%TZ)" \
             --query 'reverse(Events)[].[EventDate,Severity,Message]' \
             --output table
