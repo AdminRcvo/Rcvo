@@ -1,19 +1,37 @@
 name: Deploy to Elastic Beanstalk
 
+# ✅ OIDC requis pour assumer le rôle IAM depuis GitHub
+permissions:
+  id-token: write
+  contents: read
+
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]   # ← adapte si besoin
+    branches: [ "main" ]   # change si besoin
+
+concurrency:
+  group: eb-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: eu-west-3
+  AWS_DEFAULT_REGION: eu-west-3
+
+  # ❗️Adapte si nécessaire (noms EB existants)
+  EB_APP: Rcvo-backend
+  EB_ENV: rcvo-backend-b
+  EB_BUCKET: elasticbeanstalk-eu-west-3-409818814260
+
+  # Rôle IAM OIDC déjà créé dans ton compte
+  ROLE_ARN: arn:aws:iam::409818814260:role/GithubDeployRole
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      AWS_REGION: eu-west-3
-      EB_APP: Rcvo-backend
-      EB_ENV: rcvo-backend-b
-      EB_BUCKET: elasticbeanstalk-eu-west-3-409818814260
-      ROLE_ARN: arn:aws:iam::409818814260:role/GithubDeployRole
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout
@@ -24,86 +42,106 @@ jobs:
         with:
           role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+          output-env-credentials: true
 
-      - name: Package app (zip) + export LABEL
+      - name: WhoAmI (debug)
+        run: aws sts get-caller-identity
+
+      - name: Package app (zip)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          LABEL="ops-deploy-$(date +%Y%m%d-%H%M%S)-${GITHUB_RUN_NUMBER}"
-          S3_KEY="${{ env.EB_APP }}/${LABEL}.zip"
-          echo "→ LABEL=$LABEL"
-          zip -r "$LABEL.zip" . >/dev/null
-          # partage aux prochains steps
-          echo "LABEL=$LABEL"   >> "$GITHUB_ENV"
-          echo "S3_KEY=$S3_KEY" >> "$GITHUB_ENV"
+          set -euo pipefail
+          rm -f app.zip
+          # 🧰 Emballe tout le dépôt sauf .git et gros artefacts
+          zip -r app.zip . \
+            -x "*/.git/*" ".git/*" "*.git*" \
+            -x "node_modules/*" "*/node_modules/*" || true
+          ls -lh app.zip
 
       - name: Upload to S3 (unique key)
+        id: upload
         shell: bash
+        env:
+          EB_APP: ${{ env.EB_APP }}
+          EB_BUCKET: ${{ env.EB_BUCKET }}
         run: |
-          set -Eeuo pipefail
-          aws s3 cp "$LABEL.zip" "s3://${{ env.EB_BUCKET }}/$S3_KEY"
+          set -euo pipefail
+          LABEL="ops-deploy-$(date +%Y%m%d-%H%M%S)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          KEY="${EB_APP}/${LABEL}.zip"
+          aws s3 cp app.zip "s3://${EB_BUCKET}/${KEY}"
+          echo "label=${LABEL}"     >> "$GITHUB_OUTPUT"
+          echo "key=${KEY}"         >> "$GITHUB_OUTPUT"
+          echo "✅ Uploaded s3://${EB_BUCKET}/${KEY}"
 
       - name: Create EB Application Version (process) — always unique
         shell: bash
+        env:
+          EB_APP: ${{ env.EB_APP }}
+          EB_BUCKET: ${{ env.EB_BUCKET }}
+          LABEL: ${{ steps.upload.outputs.label }}
+          KEY: ${{ steps.upload.outputs.key }}
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           aws elasticbeanstalk create-application-version \
-            --application-name "${{ env.EB_APP }}" \
+            --application-name "$EB_APP" \
             --version-label "$LABEL" \
-            --source-bundle S3Bucket="${{ env.EB_BUCKET }}",S3Key="$S3_KEY" \
+            --source-bundle S3Bucket="$EB_BUCKET",S3Key="$KEY" \
             --process
+          echo "✅ AppVersion $LABEL (processing demandé)"
 
       - name: Update Environment
         shell: bash
+        env:
+          EB_ENV: ${{ env.EB_ENV }}
+          LABEL: ${{ steps.upload.outputs.label }}
         run: |
-          set -Eeuo pipefail
-          # petit pré-check Ready pour éviter l’erreur "Must be Ready"
-          end=$((SECONDS+600))
-          while [ $SECONDS -lt $end ]; do
+          set -euo pipefail
+          # Attendre que l'env soit "Ready" avant de pousser l'update (sécurisant)
+          t0=$SECONDS
+          while :; do
             read -r S H V < <(aws elasticbeanstalk describe-environments \
-              --application-name "${{ env.EB_APP }}" \
-              --environment-names "${{ env.EB_ENV }}" \
+              --environment-names "$EB_ENV" \
               --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
-            echo "Pre-check  Status=$S Health=$H Version=$V"
-            [ "$S" = "Ready" ] && break
+            echo "EB now: Status=$S Health=$H Version=$V"
+            [[ "$S" == "Ready" ]] && break
+            (( SECONDS - t0 > 600 )) && { echo "⏰ Timeout env not Ready"; exit 1; }
             sleep 8
           done
           aws elasticbeanstalk update-environment \
-            --application-name "${{ env.EB_APP }}" \
-            --environment-name "${{ env.EB_ENV }}" \
+            --environment-name "$EB_ENV" \
             --version-label "$LABEL"
+          echo "🚀 Bascule demandée vers $LABEL"
 
       - name: Wait until Ready/Green (≤15 min)
         shell: bash
+        env:
+          EB_ENV: ${{ env.EB_ENV }}
+          LABEL: ${{ steps.upload.outputs.label }}
         run: |
-          set -Eeuo pipefail
-          echo "⏳ Attente env=${{ env.EB_ENV }} -> Ready/(Green|Yellow|Ok) sur label=$LABEL"
+          set -euo pipefail
           end=$((SECONDS+900))
-          last=""
           while [ $SECONDS -lt $end ]; do
             read -r S H V < <(aws elasticbeanstalk describe-environments \
-              --application-name "${{ env.EB_APP }}" \
-              --environment-names "${{ env.EB_ENV }}" \
+              --environment-names "$EB_ENV" \
               --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
-            printf 'Status=%s Health=%s VersionLabel=%s (attendu=%s)\n' "$S" "$H" "$V" "$LABEL"
-            if [[ "$S" == "Ready" && "$V" == "$LABEL" && "$H" =~ ^(Green|Yellow|Ok)$ ]]; then
+            echo "Status=$S Health=$H Version=$V"
+            if [[ "$S" == "Ready" && "$V" == "$LABEL" && "$H" =~ ^(Green|Yellow)$ ]]; then
               echo "✅ Déployé: $LABEL (Health=$H)"
               exit 0
             fi
-            last="Status=$S Health=$H Version=$V"
             sleep 10
           done
-          echo "⛔ Timeout 15 min. Last=$last"
-          echo "— Derniers events EB —"
-          aws elasticbeanstalk describe-events \
-            --environment-name "${{ env.EB_ENV }}" \
-            --start-time "$(date -u -d '25 minutes ago' +%FT%TZ)" \
-            --query 'reverse(Events)[].[EventDate,Severity,Message]' --output table || true
+          echo "⏰ Timeout en attente de Ready/Green sur $LABEL"
           exit 1
 
-      - name: Post Configure AWS credentials (OIDC)
-        if: ${{ always() }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+      - name: EB events (si échec)
+        if: failure()
+        shell: bash
+        env:
+          EB_ENV: ${{ env.EB_ENV }}
+        run: |
+          aws elasticbeanstalk describe-events \
+            --environment-name "$EB_ENV" \
+            --start-time "$(date -u -d '30 minutes ago' +%FT%TZ)" \
+            --query 'reverse(Events)[].[EventDate,Severity,Message]' --output table || true
