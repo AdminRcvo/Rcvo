@@ -15,7 +15,7 @@ on:
         default: ""
 
 permissions:
-  id-token: write     # OIDC → STS
+  id-token: write   # OIDC → STS
   contents: read
 
 env:
@@ -24,11 +24,13 @@ env:
   EB_ENV: rcvo-backend-b
   EB_BUCKET: elasticbeanstalk-eu-west-3-409818814260
   ROLE_ARN: arn:aws:iam::409818814260:role/GithubDeployRole
+  AWS_PAGER: ""   # pas de pagination dans les steps
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,10 +43,20 @@ jobs:
           role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install AWS CLI + jq
+      - name: Outils (jq) + vérification AWS CLI
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y awscli jq
+          sudo apt-get install -y jq
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "aws CLI manquant -> installation v2 (fallback)…"
+            curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+            unzip -q awscliv2.zip
+            sudo ./aws/install --update
+          fi
+          aws --version
+          jq --version
 
       - name: Déployer (clone du bundle courant)
         if: inputs.mode == 'clone'
@@ -63,12 +75,12 @@ jobs:
             --application-name "$APP" --version-labels "$CUR" \
             --query 'ApplicationVersions[0].SourceBundle.S3Key' --output text)
 
-          # Nouveau label
+          # Label
           LABEL="${{ github.event.inputs.label_override }}"
           if [ -z "$LABEL" ]; then LABEL="ops-deploy-$(date +%Y%m%d-%H%M%S)-$RANDOM"; fi
           echo "→ New label: $LABEL (source: s3://$BUCKET/$SRC_KEY)"
 
-          # Crée l'AppVersion (process) + bascule l'environnement
+          # Crée l'AppVersion (process) + bascule
           aws elasticbeanstalk create-application-version --region "$REGION" \
             --application-name "$APP" --version-label "$LABEL" \
             --source-bundle S3Bucket="$BUCKET",S3Key="$SRC_KEY" --process
