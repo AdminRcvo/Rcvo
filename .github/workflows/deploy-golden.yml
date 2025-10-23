@@ -1,0 +1,37 @@
+name: RCVO — Déployer GOLDEN
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-3
+  ROLE_ARN: arn:aws:iam::409818814260:role/GithubDeployRole
+  EB_APP: Rcvo-backend
+  EB_ENV: rcvo-backend-b
+  EB_BUCKET: elasticbeanstalk-eu-west-3-409818814260
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Déployer GOLDEN latest.zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          LABEL="ops-deploy-${{ github.run_id }}-$(date +%Y%m%d-%H%M%S)"
+          aws elasticbeanstalk create-application-version --region "$AWS_REGION" \
+            --application-name "$EB_APP" --version-label "$LABEL" \
+            --source-bundle S3Bucket="$EB_BUCKET",S3Key="$EB_APP/rcvo-golden/latest.zip" --process
+          aws elasticbeanstalk update-environment --region "$AWS_REGION" \
+            --environment-name "$EB_ENV" --version-label "$LABEL"
