@@ -39,7 +39,7 @@ jobs:
       - name: Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '22'   # ⬅️ pas de cache
+          node-version: '22'
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -47,17 +47,18 @@ jobs:
           role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---- Build CI (simple et robuste) ----
-      - name: Install & build
+      # --- Build uniquement si package.json existe ---
+      - name: Install & build (si package.json)
+        if: ${{ hashFiles(format('{0}/package.json', env.APP_DIR)) != '' }}
         working-directory: ${{ env.APP_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          test -f package.json || { echo "❌ package.json introuvable dans $PWD"; ls -la; exit 1; }
+          echo "package.json détecté, on build…"
           npm ci
           npm run build || echo "ℹ️ pas de script build, on continue"
 
-      # ---- Préparation du bundle EB (avec Nginx) ----
+      # --- Préparer le bundle EB (avec Nginx) ---
       - name: Préparer le bundle EB (+ Nginx headers/redirects)
         shell: bash
         run: |
@@ -67,7 +68,7 @@ jobs:
           mkdir -p "$BUNDLE"
           rsync -a --delete "$APP_DIR/." "$BUNDLE/"
 
-          # Nginx: forcer l'en-tête final X-RCVO-Env et canonical HTTPS vers l'apex
+          # Nginx: forcer l'entête final + canonical HTTPS vers l'apex
           mkdir -p "$BUNDLE/.platform/nginx/conf.d"
           cat > "$BUNDLE/.platform/nginx/conf.d/00-rcvo-env.conf" <<'NGINX'
           proxy_hide_header X-RCVO-Env;
@@ -81,7 +82,7 @@ jobs:
           (cd "$BUNDLE" && zip -qr "$RUNNER_TEMP/bundle.zip" .)
           echo "BUNDLE_ZIP=$RUNNER_TEMP/bundle.zip" >> $GITHUB_ENV
 
-      # ---- Upload S3 + AppVersion EB + bascule ----
+      # --- Upload S3 + AppVersion EB + bascule ---
       - name: Upload vers S3
         shell: bash
         run: |
@@ -92,9 +93,7 @@ jobs:
           KEY="${{ env.EB_APP }}/$LABEL.zip"
           echo "LABEL=$LABEL" >> $GITHUB_ENV
           echo "KEY=$KEY" >> $GITHUB_ENV
-
-          aws s3 cp "$BUNDLE_ZIP" "s3://${{ env.EB_BUCKET }}/$KEY" \
-            --acl bucket-owner-full-control
+          aws s3 cp "$BUNDLE_ZIP" "s3://${{ env.EB_BUCKET }}/$KEY" --acl bucket-owner-full-control
 
       - name: EB - Create ApplicationVersion
         shell: bash
