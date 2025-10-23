@@ -9,7 +9,7 @@ on:
         default: ""
 
 permissions:
-  id-token: write   # OIDC → STS
+  id-token: write
   contents: read
 
 concurrency:
@@ -39,9 +39,7 @@ jobs:
       - name: Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: ${{ env.APP_DIR }}/package-lock.json
+          node-version: '22'   # ⬅️ pas de cache
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -49,7 +47,7 @@ jobs:
           role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---- Build côté CI (vérifie que le projet compile) ----
+      # ---- Build CI (simple et robuste) ----
       - name: Install & build
         working-directory: ${{ env.APP_DIR }}
         shell: bash
@@ -83,7 +81,7 @@ jobs:
           (cd "$BUNDLE" && zip -qr "$RUNNER_TEMP/bundle.zip" .)
           echo "BUNDLE_ZIP=$RUNNER_TEMP/bundle.zip" >> $GITHUB_ENV
 
-      # ---- Upload S3 + EB AppVersion + bascule env ----
+      # ---- Upload S3 + AppVersion EB + bascule ----
       - name: Upload vers S3
         shell: bash
         run: |
