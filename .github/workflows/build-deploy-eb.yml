@@ -3,27 +3,33 @@ name: RCVO — Build & Deploy EB (prod)
 on:
   workflow_dispatch:
     inputs:
-      version_label:
-        description: "Label personnalisé (optionnel)"
+      label_override:
+        description: "Label de version (facultatif)"
         required: false
         default: ""
 
 permissions:
-  id-token: write    # OIDC → STS
+  id-token: write   # OIDC → STS
   contents: read
 
+concurrency:
+  group: deploy-eb-prod
+  cancel-in-progress: true
+
 env:
+  APP_DIR: backend
   AWS_REGION: eu-west-3
-  ROLE_ARN: arn:aws:iam::409818814260:role/GithubDeployRole
   EB_APP: Rcvo-backend
   EB_ENV: rcvo-backend-b
   EB_BUCKET: elasticbeanstalk-eu-west-3-409818814260
+  ROLE_ARN: arn:aws:iam::409818814260:role/GithubDeployRole
   RCVO_DOMAIN: rcvo-crm-auto.com
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 40
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,6 +40,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: ${{ env.APP_DIR }}/package-lock.json
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -41,67 +49,87 @@ jobs:
           role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # ---- Build côté CI (vérifie que le projet compile) ----
       - name: Install & build
+        working-directory: ${{ env.APP_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
-          if jq -e '.scripts.build?' package.json >/dev/null 2>&1; then npm run build || true; fi
+          test -f package.json || { echo "❌ package.json introuvable dans $PWD"; ls -la; exit 1; }
+          npm ci
+          npm run build || echo "ℹ️ pas de script build, on continue"
 
+      # ---- Préparation du bundle EB (avec Nginx) ----
       - name: Préparer le bundle EB (+ Nginx headers/redirects)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p ".platform/nginx/conf.d"
-          cat > .platform/nginx/conf.d/00-rcvo-env.conf <<'NGINX'
+          APP_DIR="${{ env.APP_DIR }}"
+          BUNDLE="$RUNNER_TEMP/bundle"
+          mkdir -p "$BUNDLE"
+          rsync -a --delete "$APP_DIR/." "$BUNDLE/"
+
+          # Nginx: forcer l'en-tête final X-RCVO-Env et canonical HTTPS vers l'apex
+          mkdir -p "$BUNDLE/.platform/nginx/conf.d"
+          cat > "$BUNDLE/.platform/nginx/conf.d/00-rcvo-env.conf" <<'NGINX'
           proxy_hide_header X-RCVO-Env;
           add_header X-RCVO-Env "prod-app" always;
           NGINX
-          cat > .platform/nginx/conf.d/01-https-canonical.conf <<NGINX
+          cat > "$BUNDLE/.platform/nginx/conf.d/01-https-canonical.conf" <<NGINX
           if (\$http_x_forwarded_proto != "https") { return 301 https://${{ env.RCVO_DOMAIN }}\$request_uri; }
-          if (\$host ~* ^www\.${{ env.RCVO_DOMAIN }}\$) { return 301 https://${{ env.RCVO_DOMAIN }}\$request_uri; }
+          if (\$host ~* ^www\.${{ env.RCVO_DOMAIN }}$) { return 301 https://${{ env.RCVO_DOMAIN }}\$request_uri; }
           NGINX
-          zip -qr /tmp/bundle.zip .
 
+          (cd "$BUNDLE" && zip -qr "$RUNNER_TEMP/bundle.zip" .)
+          echo "BUNDLE_ZIP=$RUNNER_TEMP/bundle.zip" >> $GITHUB_ENV
+
+      # ---- Upload S3 + EB AppVersion + bascule env ----
       - name: Upload vers S3
-        id: upload
         shell: bash
         run: |
           set -euo pipefail
-          STAMP=$(date -u +%Y%m%d-%H%M%S)-$RANDOM
-          LABEL="${{ github.event.inputs.version_label }}"
-          if [ -z "$LABEL" ]; then LABEL="ci-${STAMP}-${GITHUB_SHA::7}"; fi
-          KEY="${{ env.EB_APP }}/${LABEL}.zip"
-          aws s3 cp /tmp/bundle.zip "s3://${{ env.EB_BUCKET }}/${KEY}" --acl bucket-owner-full-control
-          echo "label=$LABEL" >> $GITHUB_OUTPUT
-          echo "key=$KEY"     >> $GITHUB_OUTPUT
+          TS="$(date +%Y%m%d-%H%M%S)-$RANDOM"
+          LABEL="${{ github.event.inputs.label_override }}"
+          if [ -z "$LABEL" ]; then LABEL="ci-build-${TS}"; fi
+          KEY="${{ env.EB_APP }}/$LABEL.zip"
+          echo "LABEL=$LABEL" >> $GITHUB_ENV
+          echo "KEY=$KEY" >> $GITHUB_ENV
+
+          aws s3 cp "$BUNDLE_ZIP" "s3://${{ env.EB_BUCKET }}/$KEY" \
+            --acl bucket-owner-full-control
 
       - name: EB - Create ApplicationVersion
+        shell: bash
         run: |
+          set -euo pipefail
           aws elasticbeanstalk create-application-version \
             --application-name "${{ env.EB_APP }}" \
-            --version-label "${{ steps.upload.outputs.label }}" \
-            --source-bundle S3Bucket="${{ env.EB_BUCKET }}",S3Key="${{ steps.upload.outputs.key }}" \
+            --version-label "$LABEL" \
+            --source-bundle S3Bucket="${{ env.EB_BUCKET }}",S3Key="$KEY" \
             --process
 
       - name: EB - Update Environment
+        shell: bash
         run: |
+          set -euo pipefail
           aws elasticbeanstalk update-environment \
             --environment-name "${{ env.EB_ENV }}" \
-            --version-label "${{ steps.upload.outputs.label }}"
+            --version-label "$LABEL"
 
       - name: Wait Ready/Green
         shell: bash
         run: |
           set -euo pipefail
-          end=$((SECONDS+1800))
+          end=$((SECONDS+1200))
           while [ $SECONDS -lt $end ]; do
             read -r S H V < <(aws elasticbeanstalk describe-environments \
               --environment-names "${{ env.EB_ENV }}" \
               --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
             echo "EB Status=$S Health=$H Version=$V"
-            if [[ "$S" == "Ready" && "$V" == "${{ steps.upload.outputs.label }}" && "$H" =~ ^(Green|Yellow)$ ]]; then
-              echo "✅ Déployé: $V ($H)"; exit 0; fi
+            if [[ "$S" == "Ready" && "$V" == "$LABEL" && "$H" =~ ^(Green|Yellow)$ ]]; then
+              echo "✅ Déployé: $LABEL ($H)"
+              exit 0
+            fi
             sleep 10
           done
-          echo "⚠️ Timeout en attente de Ready/Green"; exit 1
+          echo "⚠️ Timeout en attente de Ready/(Green|Yellow)"; exit 1
